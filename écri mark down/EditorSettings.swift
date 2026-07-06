@@ -79,6 +79,10 @@ final class EditorSettings {
     var autosave: Bool {
         didSet { UserDefaults.standard.set(autosave, forKey: Keys.autosave) }
     }
+    /// Open documents in a new window (each its own session) instead of a new tab.
+    var openInNewWindow: Bool {
+        didSet { UserDefaults.standard.set(openInNewWindow, forKey: Keys.openInNewWindow) }
+    }
 
     private init() {
         let d = UserDefaults.standard
@@ -93,6 +97,7 @@ final class EditorSettings {
         fontSize = storedSize.map { CGFloat($0) } ?? Self.defaultFontSize
         useSerifPreview = d.object(forKey: Keys.useSerifPreview) as? Bool ?? false
         autosave = d.object(forKey: Keys.autosave) as? Bool ?? true
+        openInNewWindow = d.object(forKey: Keys.openInNewWindow) as? Bool ?? false
     }
 
     func increaseFontSize() { fontSize = min(Self.maxFontSize, (fontSize + 1).rounded()) }
@@ -118,5 +123,6 @@ final class EditorSettings {
         static let fontSize = "editor.fontSize"
         static let useSerifPreview = "editor.useSerifPreview"
         static let autosave = "editor.autosave"
+        static let openInNewWindow = "editor.openInNewWindow"
     }
 }

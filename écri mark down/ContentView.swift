@@ -8,7 +8,9 @@ private let epubType: UTType = UTType(filenameExtension: "epub")
     ?? UTType(importedAs: "org.idpf.epub-container")
 
 struct ContentView: View {
-    @State private var store = EditorStore.shared
+    var pending: PendingOpen? = nil
+
+    @State private var store = EditorStore()
     @AppStorage("viewMode") private var viewModeRaw = ViewMode.source.rawValue
     @State private var caret = CaretPosition()
     @State private var topVisibleIndex = 0
@@ -17,8 +19,10 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var exportDoc = MarkdownFile()
     @State private var closeCandidate: Document?
+    @Environment(\.openWindow) private var openWindow
     #if os(macOS)
     @State private var findModel = FindModel.shared
+    @Environment(\.controlActiveState) private var controlActiveState
     #endif
 
     private var mode: ViewMode { ViewMode(rawValue: viewModeRaw) ?? .source }
@@ -40,6 +44,13 @@ struct ContentView: View {
         }
         .frame(minWidth: 600, minHeight: 400)
         .toolbar { toolbar }
+        .focusedSceneValue(\.editorStore, store)
+        .onAppear { setUpWindow() }
+        #if os(macOS)
+        .onChange(of: controlActiveState) { _, state in
+            if state == .key { WindowRouter.shared.setActive(store) }
+        }
+        #endif
         #if !os(macOS)
         .sheet(isPresented: $showSettings) { SettingsView() }
         .confirmationDialog("Save changes before closing?",
@@ -124,10 +135,25 @@ struct ContentView: View {
 
     func openAction() {
         #if os(macOS)
-        store.openViaPanel()
+        WindowRouter.shared.openViaPanel()
         #else
         showOpenPanel = true
         #endif
+    }
+
+    private func setUpWindow() {
+        WindowRouter.shared.register(store)
+        WindowRouter.shared.openWindow = { po in openWindow(value: po) }
+        guard let bm = pending?.bookmark else { return }
+        var stale = false
+        #if os(macOS)
+        let opts: URL.BookmarkResolutionOptions = [.withSecurityScope]
+        #else
+        let opts: URL.BookmarkResolutionOptions = []
+        #endif
+        if let url = try? URL(resolvingBookmarkData: bm, options: opts, relativeTo: nil, bookmarkDataIsStale: &stale) {
+            store.open(url: url)
+        }
     }
 
     func saveAction() {
@@ -356,7 +382,7 @@ struct RecentsWelcomeView: View {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(recents.prefix(8)) { item in
                     Button {
-                        store.openRecent(item)
+                        WindowRouter.shared.openRecent(item)
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: "doc.text")

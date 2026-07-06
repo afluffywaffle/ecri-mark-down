@@ -119,6 +119,19 @@ enum Highlighter {
 final class LineHighlightTextView: NSTextView {
     var highlightCurrentLine = true
     var currentLineColor: NSColor = .clear
+    /// Called when a file is dropped onto the editor (so we open it instead of
+    /// inserting its path as text).
+    var onFileDrop: (([URL]) -> Void)?
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let opts: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        if let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                                            options: opts) as? [URL], !urls.isEmpty {
+            onFileDrop?(urls)
+            return true
+        }
+        return super.performDragOperation(sender)
+    }
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
@@ -276,6 +289,7 @@ struct SyntaxHighlightingEditor: NSViewRepresentable {
         tv.drawsBackground = true
         tv.usesFindBar = true
         tv.isIncrementalSearchingEnabled = true
+        tv.onFileDrop = { urls in urls.forEach { WindowRouter.shared.openFile(url: $0) } }
         tv.string = text
 
         let scroll = NSScrollView()
@@ -293,23 +307,11 @@ struct SyntaxHighlightingEditor: NSViewRepresentable {
         context.coordinator.textView = tv
         context.coordinator.gutter = gutter
         context.coordinator.container = containerView
-        EditorActionBus.shared.handler = { [weak coord = context.coordinator] action in
-            coord?.performAction(action)
-        }
-        EditorActionBus.shared.scrollHandler = { [weak coord = context.coordinator] index, topInset in
-            coord?.scrollTo(index, topInset: topInset)
-        }
-        EditorActionBus.shared.findHandler = { [weak coord = context.coordinator] tag in
-            coord?.performFind(tag)
-        }
-        EditorActionBus.shared.revealHandler = { [weak coord = context.coordinator] range in
-            coord?.revealRange(range)
-        }
-        EditorActionBus.shared.replaceHandler = { [weak coord = context.coordinator] range, string in
-            coord?.replace(range: range, with: string)
-        }
-        EditorActionBus.shared.replaceAllHandler = { [weak coord = context.coordinator] query, replacement, caseSensitive in
-            coord?.replaceAll(query: query, with: replacement, caseSensitive: caseSensitive)
+        context.coordinator.claimBus()
+        NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification,
+                                               object: nil, queue: .main) { [weak coord = context.coordinator] note in
+            guard let coord, let win = note.object as? NSWindow, coord.textView?.window === win else { return }
+            coord.claimBus()
         }
 
         scroll.contentView.postsBoundsChangedNotifications = true
@@ -390,6 +392,18 @@ struct SyntaxHighlightingEditor: NSViewRepresentable {
         var styleSignature = ""
 
         init(_ parent: SyntaxHighlightingEditor) { self.parent = parent }
+
+        /// Point the global action bus at this (focused) editor, so formatting,
+        /// find, and navigation act on the window the user is actually in.
+        func claimBus() {
+            let bus = EditorActionBus.shared
+            bus.handler = { [weak self] a in self?.performAction(a) }
+            bus.scrollHandler = { [weak self] i, t in self?.scrollTo(i, topInset: t) }
+            bus.findHandler = { [weak self] tag in self?.performFind(tag) }
+            bus.revealHandler = { [weak self] r in self?.revealRange(r) }
+            bus.replaceHandler = { [weak self] r, s in self?.replace(range: r, with: s) }
+            bus.replaceAllHandler = { [weak self] q, r, c in self?.replaceAll(query: q, with: r, caseSensitive: c) }
+        }
 
         func textDidChange(_ notification: Notification) {
             guard !isUpdating, let tv = notification.object as? NSTextView else { return }

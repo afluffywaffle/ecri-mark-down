@@ -55,8 +55,6 @@ class Document: Identifiable {
 
 @Observable
 class EditorStore {
-    static let shared = EditorStore()
-
     var documents: [Document] = []
     var selectedID: UUID?
 

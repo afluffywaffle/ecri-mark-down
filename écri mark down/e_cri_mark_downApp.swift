@@ -17,14 +17,9 @@ struct e_cri_mark_downApp: App {
     #endif
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .onOpenURL { url in EditorStore.shared.open(url: url) }
-                .dropDestination(for: URL.self) { urls, _ in
-                    let files = urls.filter { $0.isFileURL }
-                    files.forEach { EditorStore.shared.open(url: $0) }
-                    return !files.isEmpty
-                }
+        WindowGroup(for: PendingOpen.self) { $pending in
+            ContentView(pending: pending)
+                .onOpenURL { url in WindowRouter.shared.openFile(url: url) }
         }
         .commands { AppCommands() }
         #if os(macOS)
@@ -39,12 +34,12 @@ struct e_cri_mark_downApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Files opened from Finder (double-click / "Open With") or drag-to-Dock.
     func application(_ application: NSApplication, open urls: [URL]) {
-        urls.forEach { EditorStore.shared.open(url: $0) }
+        urls.forEach { WindowRouter.shared.openFile(url: $0) }
     }
 
-    /// Guard against quitting with unsaved changes.
+    /// Guard against quitting with unsaved changes across all windows.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let unsaved = EditorStore.shared.documents.filter { $0.isModified }
+        let unsaved = WindowRouter.shared.unsavedPairs()
         guard !unsaved.isEmpty else { return .terminateNow }
 
         let alert = NSAlert()
@@ -58,12 +53,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            for doc in unsaved {
-                EditorStore.shared.selectedID = doc.id
-                EditorStore.shared.saveSelected()
+            for (store, doc) in unsaved {
+                store.selectedID = doc.id
+                store.saveSelected()
             }
-            // If an untitled save was cancelled, abort the quit.
-            return EditorStore.shared.documents.contains { $0.isModified } ? .terminateCancel : .terminateNow
+            return WindowRouter.shared.hasUnsavedChanges() ? .terminateCancel : .terminateNow
         case .alertSecondButtonReturn:
             return .terminateNow
         default:
@@ -77,13 +71,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct AppCommands: Commands {
     @AppStorage("viewMode") private var viewModeRaw = ViewMode.source.rawValue
+    @FocusedValue(\.editorStore) private var store
 
     var body: some Commands {
-        CommandGroup(replacing: .newItem) {
-            Button("New Tab") { EditorStore.shared.newDocument() }
+        // Keep the system "New Window" (⌘N) and add "New Tab" beside it.
+        CommandGroup(after: .newItem) {
+            Button("New Tab") { store?.newDocument() }
                 .keyboardShortcut("t", modifiers: .command)
+                .disabled(store == nil)
             #if os(macOS)
-            Button("Open…") { EditorStore.shared.openViaPanel() }
+            Button("Open…") { WindowRouter.shared.openViaPanel() }
                 .keyboardShortcut("o", modifiers: .command)
             RecentsMenu()
             #endif
@@ -91,8 +88,9 @@ struct AppCommands: Commands {
 
         #if os(macOS)
         CommandGroup(replacing: .saveItem) {
-            Button("Save") { EditorStore.shared.saveSelected() }
+            Button("Save") { store?.saveSelected() }
                 .keyboardShortcut("s", modifiers: .command)
+                .disabled(store == nil)
         }
         #endif
 
@@ -157,7 +155,7 @@ struct RecentsMenu: View {
                 Text("No Recent Files")
             } else {
                 ForEach(recents.items) { item in
-                    Button(item.name) { EditorStore.shared.openRecent(item) }
+                    Button(item.name) { WindowRouter.shared.openRecent(item) }
                 }
                 Divider()
                 Button("Clear Menu") { recents.clear() }

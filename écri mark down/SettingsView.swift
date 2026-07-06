@@ -52,6 +52,16 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Windows") {
+                Picker("Open documents in", selection: $settings.openInNewWindow) {
+                    Text("A new tab").tag(false)
+                    Text("A new window").tag(true)
+                }
+                Text("New windows are independent sessions with their own tabs.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Preview") {
                 Toggle("Serif preview font", isOn: $settings.useSerifPreview)
             }
