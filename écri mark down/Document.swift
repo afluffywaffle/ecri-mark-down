@@ -382,7 +382,7 @@ class EditorStore {
             let opfURL = tmp.appendingPathComponent(opfPath)
             let opfDir = opfURL.deletingLastPathComponent()
             if let opfXML = try? String(contentsOf: opfURL, encoding: .utf8) {
-                let spineText = extractSpineText(opfXML: opfXML, opfDir: opfDir)
+                let spineText = extractSpineText(opfXML: opfXML, opfDir: opfDir, root: tmp)
                 if !spineText.isEmpty { return spineText }
             }
         }
@@ -396,7 +396,7 @@ class EditorStore {
 
     // MARK: - EPUB helpers
 
-    private static func extractSpineText(opfXML: String, opfDir: URL) -> String {
+    private static func extractSpineText(opfXML: String, opfDir: URL, root: URL) -> String {
         // Build manifest: id → href
         var manifest: [String: String] = [:]
         enumerateCaptures(in: opfXML,
@@ -422,7 +422,11 @@ class EditorStore {
         var texts: [String] = []
         for id in spineIDs {
             guard let href = manifest[id] else { continue }
-            let fileURL = opfDir.appendingPathComponent(href)
+            // Normalize the manifest href ("../" components etc.) and refuse
+            // any path that escapes the extraction directory.
+            let fileURL = opfDir.appendingPathComponent(href).standardizedFileURL
+            let rootPath = root.standardizedFileURL.path
+            guard fileURL.path == rootPath || fileURL.path.hasPrefix(rootPath + "/") else { continue }
             guard let html = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
             let stripped = stripHTML(html)
             if !stripped.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
