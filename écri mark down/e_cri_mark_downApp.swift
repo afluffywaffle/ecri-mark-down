@@ -91,6 +91,23 @@ struct AppCommands: Commands {
             Button("Save") { store?.saveSelected() }
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(store == nil)
+            Button("Save As…") { store?.saveSelectedAs() }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(store == nil)
+            Button("Reveal in Finder") {
+                if let doc = store?.selectedDocument { store?.revealInFinder(doc) }
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled((store?.selectedDocument?.fileURL) == nil)
+        }
+        CommandGroup(replacing: .printItem) {
+            Button("Print…") {
+                // Resolve the doc from the focused store, falling back to the active window.
+                if let doc = store?.selectedDocument ?? WindowRouter.shared.activeStore?.selectedDocument {
+                    MarkdownPrinter.print(doc)
+                }
+            }
+            .keyboardShortcut("p", modifiers: .command)
         }
         #endif
 
@@ -105,6 +122,9 @@ struct AppCommands: Commands {
                 .keyboardShortcut("g", modifiers: .command)
             Button("Find Previous") { FindModel.shared.prev() }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
+            Divider()
+            Button("Show Outline") { OutlineModel.shared.toggle() }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
             #else
             // iOS uses the system find interaction (tags are NSTextFinder.Action raw values).
             Button("Find…") { EditorActionBus.shared.find(1) }

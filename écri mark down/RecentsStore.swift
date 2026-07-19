@@ -35,6 +35,11 @@ final class RecentsStore {
         save()
     }
 
+    /// The stored security-scoped bookmark for a URL, if we have one.
+    func bookmark(for url: URL) -> Data? {
+        items.first { $0.url == url }?.bookmark
+    }
+
     func clear() {
         items = []
         save()

@@ -15,6 +15,10 @@ class Document: Identifiable {
     var content: String
     var fileURL: URL?
     var isModified = false
+    /// True once the user has been warned that saving this document to .docx
+    /// loses Markdown/rich formatting. Set on open (for docx files opened as-is)
+    /// or after the Save/Save As warning is shown, so we don't nag on every autosave.
+    var docxWarningAcknowledged = false
 
     init(title: String = "Untitled", content: String = "", fileURL: URL? = nil) {
         self.title = title
@@ -30,6 +34,7 @@ class Document: Identifiable {
     var preferredSaveExtension: String {
         switch fileURL?.pathExtension.lowercased() {
         case "txt":          return "txt"
+        case "docx":         return "docx"
         case "rtf", "rtfd",
              "epub":         return "txt"
         default:             return "md"
@@ -78,6 +83,17 @@ class EditorStore {
         selectedID = doc.id
     }
 
+    /// Adopt an existing document (e.g. a tab moved in from another window),
+    /// replacing the initial blank tab if untouched.
+    func adopt(_ doc: Document) {
+        if documents.count == 1, let first = documents.first, !first.isModified, first.fileURL == nil {
+            documents[0] = doc
+        } else {
+            documents.append(doc)
+        }
+        selectedID = doc.id
+    }
+
     func close(_ doc: Document) {
         guard let index = documents.firstIndex(where: { $0.id == doc.id }) else { return }
         documents.remove(at: index)
@@ -96,9 +112,14 @@ class EditorStore {
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
 
-        guard let content = Self.readContent(from: url) else { return }
+        guard let content = Self.readContent(from: url) else {
+            Self.presentOpenFailure(url)
+            return
+        }
         RecentsStore.shared.add(url: url)
         let doc = Document(title: url.lastPathComponent, content: content, fileURL: url)
+        // Already docx on disk — nothing new is being lost by re-saving it, so skip the warning.
+        if url.pathExtension.lowercased() == "docx" { doc.docxWarningAcknowledged = true }
         if documents.count == 1,
            let first = documents.first,
            !first.isModified,
@@ -119,9 +140,13 @@ class EditorStore {
             selectedID = existing.id
             return
         }
-        guard let content = Self.readContent(from: url) else { return }
+        guard let content = Self.readContent(from: url) else {
+            Self.presentOpenFailure(url)
+            return
+        }
         RecentsStore.shared.add(url: url)
         let doc = Document(title: url.lastPathComponent, content: content, fileURL: url)
+        if url.pathExtension.lowercased() == "docx" { doc.docxWarningAcknowledged = true }
         if documents.count == 1, let first = documents.first, !first.isModified, first.fileURL == nil {
             documents[0] = doc
         } else {
@@ -130,12 +155,27 @@ class EditorStore {
         selectedID = doc.id
     }
 
+    /// Tell the user a file couldn't be opened instead of failing silently
+    /// (a silent failure here is how a "blank window" appears with no document).
+    static func presentOpenFailure(_ url: URL?) {
+        #if os(macOS)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Couldn’t Open File"
+        alert.informativeText = url.map {
+            "“\($0.lastPathComponent)” couldn’t be read. It may have been moved, renamed, or be in an unsupported format."
+        } ?? "The file couldn’t be found. It may have been moved or renamed."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+        #endif
+    }
+
     #if os(macOS)
     /// Present an open panel (used by both the toolbar and the File menu).
     func openViaPanel() {
         let panel = NSOpenPanel()
         var types: [UTType] = [.plainText, .rtf]
-        types += ["md", "markdown", "epub"].compactMap { UTType(filenameExtension: $0) }
+        types += ["md", "markdown", "epub", "docx", "txt"].compactMap { UTType(filenameExtension: $0) }
         panel.allowedContentTypes = types
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -151,11 +191,86 @@ class EditorStore {
         }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "Untitled.md"
+        panel.allowedContentTypes = savePanelTypes
         if panel.runModal() == .OK, let url = panel.url {
+            guard confirmDocxFormattingLossIfNeeded(doc, targetURL: url) else { return }
             doc.fileURL = url
             doc.title = url.lastPathComponent
             save(doc)
             RecentsStore.shared.add(url: url)
+        }
+    }
+
+    /// Save As — always prompt for a new location, repointing the document there.
+    func saveSelectedAs() {
+        guard let doc = selectedDocument else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = doc.fileURL?.lastPathComponent
+            ?? "\(doc.title.isEmpty ? "Untitled" : doc.title).\(doc.preferredSaveExtension)"
+        panel.allowedContentTypes = savePanelTypes
+        if panel.runModal() == .OK, let url = panel.url {
+            guard confirmDocxFormattingLossIfNeeded(doc, targetURL: url) else { return }
+            doc.fileURL = url
+            doc.title = url.lastPathComponent
+            save(doc)
+            RecentsStore.shared.add(url: url)
+        }
+    }
+
+    private var savePanelTypes: [UTType] {
+        [.plainText] + ["md", "markdown", "txt", "docx"].compactMap { UTType(filenameExtension: $0) }
+    }
+
+    /// If the user is saving to a .docx location for the first time, warn that Markdown/rich
+    /// formatting won't be preserved — .docx is written as plain Word paragraphs. Returns
+    /// false if the user cancels, in which case the caller should abort the save.
+    private func confirmDocxFormattingLossIfNeeded(_ doc: Document, targetURL: URL) -> Bool {
+        guard targetURL.pathExtension.lowercased() == "docx", !doc.docxWarningAcknowledged else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Save as Word Document?"
+        alert.informativeText = "Markdown formatting (headings, bold, links, tables, etc.) will not be "
+            + "preserved — the file will be saved as plain, unstyled paragraphs of text."
+        alert.addButton(withTitle: "Save as .docx")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        doc.docxWarningAcknowledged = true
+        return true
+    }
+
+    /// Reveal the document's on-disk file in Finder, selecting it. No-op for
+    /// untitled documents that haven't been saved anywhere yet.
+    func revealInFinder(_ doc: Document) {
+        guard let url = doc.fileURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// Rename a document from its tab. Renames the on-disk file when one exists,
+    /// otherwise just updates the in-memory title of an untitled document.
+    func rename(_ doc: Document, to rawName: String) {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != doc.title else { return }
+
+        guard let oldURL = doc.fileURL else {
+            doc.title = trimmed
+            return
+        }
+        // Preserve the existing extension if the user didn't type one.
+        var newName = trimmed
+        if (newName as NSString).pathExtension.isEmpty, !oldURL.pathExtension.isEmpty {
+            newName += "." + oldURL.pathExtension
+        }
+        let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(newName)
+        guard newURL != oldURL else { return }
+
+        let accessed = oldURL.startAccessingSecurityScopedResource()
+        defer { if accessed { oldURL.stopAccessingSecurityScopedResource() } }
+        do {
+            try FileManager.default.moveItem(at: oldURL, to: newURL)
+            doc.fileURL = newURL
+            doc.title = newURL.lastPathComponent
+            RecentsStore.shared.add(url: newURL)
+        } catch {
+            NSSound.beep()
         }
     }
     #endif
@@ -164,6 +279,13 @@ class EditorStore {
         guard let url = doc.fileURL else { return }
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        #if os(macOS)
+        if url.pathExtension.lowercased() == "docx" {
+            guard DocxSupport.write(content: doc.content, to: url) else { NSSound.beep(); return }
+            doc.isModified = false
+            return
+        }
+        #endif
         try? doc.content.write(to: url, atomically: true, encoding: .utf8)
         doc.isModified = false
     }
@@ -191,6 +313,8 @@ class EditorStore {
             return readRTF(url: url)
         case "epub":
             return readEPUB(url: url)
+        case "docx":
+            return DocxSupport.read(url: url)
         default:
             return (try? String(contentsOf: url, encoding: .utf8))
                 ?? (try? String(contentsOf: url, encoding: .isoLatin1))

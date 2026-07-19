@@ -6,6 +6,8 @@ import AppKit
 
 private let epubType: UTType = UTType(filenameExtension: "epub")
     ?? UTType(importedAs: "org.idpf.epub-container")
+private let docxType: UTType = UTType(filenameExtension: "docx")
+    ?? UTType(importedAs: "org.openxmlformats.wordprocessingml.document")
 
 struct ContentView: View {
     var pending: PendingOpen? = nil
@@ -19,9 +21,12 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var exportDoc = MarkdownFile()
     @State private var closeCandidate: Document?
+    @State private var wordCount = 0
+    @State private var wordCountWork: DispatchWorkItem?
     @Environment(\.openWindow) private var openWindow
     #if os(macOS)
     @State private var findModel = FindModel.shared
+    @State private var outlineModel = OutlineModel.shared
     @Environment(\.controlActiveState) private var controlActiveState
     #endif
 
@@ -33,7 +38,8 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TabBarView(store: store, onClose: requestClose)
+            TabBarView(store: store, onClose: requestClose,
+                       onMove: { WindowRouter.shared.moveToNewWindow($0, from: store) })
             Divider()
             if EditorSettings.shared.formattingToolsEnabled {
                 FormattingBar()
@@ -45,7 +51,11 @@ struct ContentView: View {
         .frame(minWidth: 600, minHeight: 400)
         .toolbar { toolbar }
         .focusedSceneValue(\.editorStore, store)
-        .onAppear { setUpWindow() }
+        .onAppear { setUpWindow(); recomputeWordCount() }
+        // Word count recomputes immediately on document switch, and (debounced) from the
+        // editor's onEdit callback while typing — NOT via an onChange on content, which
+        // would re-evaluate the whole view on every keystroke.
+        .onChange(of: store.selectedID) { _, _ in recomputeWordCount() }
         #if os(macOS)
         .onChange(of: controlActiveState) { _, state in
             if state == .key { WindowRouter.shared.setActive(store) }
@@ -65,7 +75,7 @@ struct ContentView: View {
         #endif
         .fileImporter(
             isPresented: $showOpenPanel,
-            allowedContentTypes: [.plainText, .rtf, epubType],
+            allowedContentTypes: [.plainText, .rtf, epubType, docxType],
             allowsMultipleSelection: false
         ) { result in
             guard case .success(let urls) = result, let url = urls.first else { return }
@@ -89,7 +99,7 @@ struct ContentView: View {
         let base = doc.title
         let ext = doc.preferredSaveExtension
         // Strip any existing known extension before appending the preferred one
-        let knownExtensions = ["md", "txt", "rtf", "rtfd", "epub"]
+        let knownExtensions = ["md", "txt", "rtf", "rtfd", "epub", "docx"]
         let currentExt = (base as NSString).pathExtension.lowercased()
         if knownExtensions.contains(currentExt) {
             return (base as NSString).deletingPathExtension + "." + ext
@@ -105,6 +115,10 @@ struct ContentView: View {
                 FindSidebar(text: store.selectedDocument?.content ?? "")
                 Divider()
             }
+            if outlineModel.isOpen {
+                OutlineSidebar(text: store.selectedDocument?.content ?? "")
+                Divider()
+            }
             editorArea
         }
         #else
@@ -118,8 +132,11 @@ struct ContentView: View {
             ZStack {
                 MarkdownEditorView(document: doc, mode: mode, caret: $caret,
                                    topVisibleIndex: $topVisibleIndex, onEdit: {
-                    doc.isModified = true
+                    // Guard the flag: setting it every keystroke re-notifies observers
+                    // (tab bar, status bar) even when it's already true.
+                    if !doc.isModified { doc.isModified = true }
                     store.scheduleAutosave(doc)
+                    scheduleWordCount()
                 })
                 .id(doc.id)
 
@@ -144,16 +161,35 @@ struct ContentView: View {
     private func setUpWindow() {
         WindowRouter.shared.register(store)
         WindowRouter.shared.openWindow = { po in openWindow(value: po) }
-        guard let bm = pending?.bookmark else { return }
+        // Deliver any Finder-opens that arrived before this window wired up.
+        WindowRouter.shared.flushPendingOpens()
+        guard let pending else { return }
+
+        let url = pending.bookmark.flatMap(resolveBookmark)
+
+        if let content = pending.content {
+            // A tab torn off into this window — keep its content, file, and dirty state.
+            let doc = Document(title: pending.title ?? "Untitled", content: content, fileURL: url)
+            doc.isModified = pending.isModified ?? false
+            store.adopt(doc)
+        } else if let url {
+            store.open(url: url)
+        } else if pending.bookmark != nil {
+            // This window was created to show a file, but its bookmark no longer
+            // resolves (stale restoration data, file moved). Say so rather than
+            // silently presenting a blank untitled window.
+            EditorStore.presentOpenFailure(nil)
+        }
+    }
+
+    private func resolveBookmark(_ data: Data) -> URL? {
         var stale = false
         #if os(macOS)
         let opts: URL.BookmarkResolutionOptions = [.withSecurityScope]
         #else
         let opts: URL.BookmarkResolutionOptions = []
         #endif
-        if let url = try? URL(resolvingBookmarkData: bm, options: opts, relativeTo: nil, bookmarkDataIsStale: &stale) {
-            store.open(url: url)
-        }
+        return try? URL(resolvingBookmarkData: data, options: opts, relativeTo: nil, bookmarkDataIsStale: &stale)
     }
 
     func saveAction() {
@@ -195,7 +231,7 @@ struct ContentView: View {
             Divider()
             HStack(spacing: 16) {
                 Text("Ln \(caret.line), Col \(caret.column)")
-                Text("\(doc.wordCount) words")
+                Text("\(wordCount) words")
                 Spacer()
                 Text(saveStatusText(for: doc))
                 Text(doc.fileTypeLabel)
@@ -207,6 +243,25 @@ struct ContentView: View {
             .frame(height: 22)
             .background(.bar)
         }
+    }
+
+    /// Count words in the selected document now (used on load / document switch).
+    private func recomputeWordCount() {
+        wordCountWork?.cancel()
+        wordCount = store.selectedDocument?.wordCount ?? 0
+    }
+
+    /// Recompute the word count 0.4s after the last keystroke, so rapid typing on a
+    /// large document doesn't split the whole string on every character.
+    private func scheduleWordCount() {
+        wordCountWork?.cancel()
+        guard let doc = store.selectedDocument else { return }
+        let work = DispatchWorkItem { [weak doc] in
+            guard let doc else { return }
+            wordCount = doc.wordCount
+        }
+        wordCountWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
     private func saveStatusText(for doc: Document) -> String {
@@ -239,6 +294,16 @@ struct ContentView: View {
             }
             .keyboardShortcut("p", modifiers: [.command, .shift])
             .help("Cycle View: Source → Split → Preview (⌘⇧P)")
+
+            #if os(macOS)
+            Button {
+                outlineModel.toggle()
+            } label: {
+                Label("Outline", systemImage: "list.bullet.indent")
+            }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
+            .help("Toggle Outline — filter/jump by heading (⌘⇧O)")
+            #endif
 
             // Reader ⇄ authoring: surfaced as a button, not buried in Settings.
             Button {
@@ -281,6 +346,7 @@ struct ContentView: View {
 struct TabBarView: View {
     var store: EditorStore
     var onClose: (Document) -> Void
+    var onMove: (Document) -> Void
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -289,8 +355,23 @@ struct TabBarView: View {
                     TabCell(
                         doc: doc,
                         isSelected: doc.id == store.selectedID,
+                        canMove: store.documents.count > 1,
                         onSelect: { store.selectedID = doc.id },
-                        onClose: { onClose(doc) }
+                        onClose: { onClose(doc) },
+                        onMove: { onMove(doc) },
+                        onReveal: {
+                            #if os(macOS)
+                            store.revealInFinder(doc)
+                            #endif
+                        },
+                        onRename: { renamed, name in
+                            #if os(macOS)
+                            store.rename(renamed, to: name)
+                            #else
+                            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty { renamed.title = trimmed }
+                            #endif
+                        }
                     )
                 }
 
@@ -314,12 +395,19 @@ struct TabBarView: View {
 struct TabCell: View {
     var doc: Document
     var isSelected: Bool
+    var canMove: Bool = false
     var onSelect: () -> Void
     var onClose: () -> Void
+    var onMove: () -> Void = {}
+    var onReveal: () -> Void = {}
+    var onRename: (Document, String) -> Void = { _, _ in }
 
     #if os(macOS)
     @State private var isHovered = false
     #endif
+    @State private var isEditing = false
+    @State private var editText = ""
+    @FocusState private var fieldFocused: Bool
 
     var showCloseButton: Bool {
         #if os(macOS)
@@ -332,21 +420,37 @@ struct TabCell: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 4) {
-                Text(doc.displayTitle)
-                    .font(.system(size: 12, weight: isSelected ? .medium : .regular))
-                    .lineLimit(1)
-                    .frame(maxWidth: 140, alignment: .leading)
+                if isEditing {
+                    TextField("", text: $editText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .frame(maxWidth: 140, alignment: .leading)
+                        .focused($fieldFocused)
+                        .onSubmit(commitRename)
+                        .onChange(of: fieldFocused) { _, focused in
+                            if !focused { commitRename() }   // commit when focus leaves
+                        }
+                        #if os(macOS)
+                        .onExitCommand(perform: cancelRename)
+                        #endif
+                } else {
+                    Text(doc.displayTitle)
+                        .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                        .lineLimit(1)
+                        .frame(maxWidth: 140, alignment: .leading)
+                        .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename() })
 
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 14, height: 14)
-                        .background(.secondary.opacity(0.15))
-                        .clipShape(Circle())
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 14, height: 14)
+                            .background(.secondary.opacity(0.15))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .opacity(showCloseButton ? 1 : 0)
                 }
-                .buttonStyle(.plain)
-                .opacity(showCloseButton ? 1 : 0)
             }
             .padding(.horizontal, 10)
             .frame(height: 28)
@@ -357,6 +461,32 @@ struct TabCell: View {
         #if os(macOS)
         .onHover { isHovered = $0 }
         #endif
+        .contextMenu {
+            Button("Rename") { beginRename() }
+            Button("Move to New Window") { onMove() }
+                .disabled(!canMove)
+            #if os(macOS)
+            Button("Reveal in Finder") { onReveal() }
+                .disabled(doc.fileURL == nil)
+            #endif
+            Button("Close Tab") { onClose() }
+        }
+    }
+
+    private func beginRename() {
+        editText = doc.title
+        isEditing = true
+        fieldFocused = true
+    }
+
+    private func commitRename() {
+        guard isEditing else { return }
+        isEditing = false
+        onRename(doc, editText)
+    }
+
+    private func cancelRename() {
+        isEditing = false
     }
 }
 
