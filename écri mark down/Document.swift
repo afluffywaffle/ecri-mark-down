@@ -281,13 +281,37 @@ class EditorStore {
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         #if os(macOS)
         if url.pathExtension.lowercased() == "docx" {
-            guard DocxSupport.write(content: doc.content, to: url) else { NSSound.beep(); return }
+            guard DocxSupport.write(content: doc.content, to: url) else {
+                Self.presentSaveFailure(url, error: nil)
+                return
+            }
             doc.isModified = false
             return
         }
         #endif
-        try? doc.content.write(to: url, atomically: true, encoding: .utf8)
-        doc.isModified = false
+        do {
+            try doc.content.write(to: url, atomically: true, encoding: .utf8)
+            doc.isModified = false
+        } catch {
+            // Keep isModified = true so the dirty indicator stays and a later
+            // save is retried — a silently swallowed error here is data loss.
+            Self.presentSaveFailure(url, error: error)
+        }
+    }
+
+    /// Tell the user a save failed instead of silently dropping their changes.
+    static func presentSaveFailure(_ url: URL, error: Error?) {
+        #if os(macOS)
+        NSSound.beep()
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Couldn’t Save File"
+        var info = "“\(url.lastPathComponent)” couldn’t be saved. Your changes are still in the editor — try saving again or use Save As."
+        if let error { info += "\n\n(\(error.localizedDescription))" }
+        alert.informativeText = info
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+        #endif
     }
 
     /// Debounced live save. Only saves documents that already have a location and
