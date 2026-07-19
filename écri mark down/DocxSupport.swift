@@ -18,7 +18,9 @@ enum DocxSupport {
 
         let unzip = Process()
         unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        unzip.arguments = ["-q", url.path, "-d", tmp.path]
+        // Extract only the member we read — not the whole archive (which can
+        // contain arbitrarily large media).
+        unzip.arguments = ["-q", "-o", url.path, "word/document.xml", "-d", tmp.path]
         guard (try? unzip.run()) != nil else { return nil }
         unzip.waitUntilExit()
         guard unzip.terminationStatus == 0 else { return nil }

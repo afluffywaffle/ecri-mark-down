@@ -361,10 +361,18 @@ class EditorStore {
 
         let unzip = Process()
         unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        unzip.arguments = ["-q", url.path, "-d", tmp.path]
+        // Extract only text-bearing members — not the whole archive, which can
+        // contain arbitrarily large images/fonts/audio. Patterns cover the
+        // container/OPF metadata plus the HTML content the spine references.
+        unzip.arguments = ["-q", "-o", url.path,
+                           "META-INF/container.xml", "*.opf", "*.ncx",
+                           "*.xhtml", "*.html", "*.htm",
+                           "-d", tmp.path]
         guard (try? unzip.run()) != nil else { return nil }
         unzip.waitUntilExit()
-        guard unzip.terminationStatus == 0 else { return nil }
+        // 0 = ok, 1 = warnings, 11 = some patterns matched nothing (expected —
+        // not every EPUB has every extension). Anything else is a real failure.
+        guard [0, 1, 11].contains(unzip.terminationStatus) else { return nil }
 
         // Try to follow the EPUB spine via container.xml → OPF
         let containerURL = tmp.appendingPathComponent("META-INF/container.xml")
