@@ -58,6 +58,19 @@ final class RecentsStore {
             remove(item)
             return nil
         }
+        if stale {
+            // A stale bookmark still resolves now but may stop working later —
+            // recreate and persist it while we can (needs an access scope).
+            #if os(macOS)
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            #endif
+            if let fresh = makeBookmark(url),
+               let idx = items.firstIndex(where: { $0.id == item.id }) {
+                items[idx] = RecentItem(url: url, bookmark: fresh)
+                save()
+            }
+        }
         return url
     }
 
