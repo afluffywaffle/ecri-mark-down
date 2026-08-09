@@ -77,6 +77,11 @@ class EditorStore {
         return documents.first { $0.id == id }
     }
 
+    /// Any document in this session with unsaved edits.
+    var hasUnsavedChanges: Bool {
+        documents.contains { $0.isModified }
+    }
+
     func newDocument() {
         let doc = Document()
         documents.append(doc)

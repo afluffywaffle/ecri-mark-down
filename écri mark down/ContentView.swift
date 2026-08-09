@@ -14,20 +14,33 @@ struct ContentView: View {
 
     @State private var store = EditorStore()
     @AppStorage("viewMode") private var viewModeRaw = ViewMode.source.rawValue
-    @State private var caret = CaretPosition()
-    @State private var topVisibleIndex = 0
     @State private var showOpenPanel = false
     @State private var showSavePanel = false
     @State private var showSettings = false
+    #if !os(macOS)
+    @State private var showTabSwitcher = false
+    // Inline rename of the toolbar title (the iOS analogue of double-clicking a
+    // macOS tab). renameDoc pins the rename to the doc it started on so switching
+    // tabs mid-rename can't commit to the wrong document.
+    @State private var renamingTitle = false
+    @State private var renameText = ""
+    @State private var renameDoc: Document?
+    @FocusState private var titleFieldFocused: Bool
+    #endif
     @State private var exportDoc = MarkdownFile()
     @State private var closeCandidate: Document?
-    @State private var wordCount = 0
-    @State private var wordCountWork: DispatchWorkItem?
     @Environment(\.openWindow) private var openWindow
     #if os(macOS)
+    @State private var caret = CaretPosition()
+    @State private var topVisibleIndex = 0
+    @State private var wordCount = 0
+    @State private var wordCountWork: DispatchWorkItem?
     @State private var findModel = FindModel.shared
     @State private var outlineModel = OutlineModel.shared
     @Environment(\.controlActiveState) private var controlActiveState
+    /// Retained per-window so the red close button prompts before discarding edits
+    /// (the tab-close and quit paths already guard; the window close did not).
+    @State private var closeGuard = WindowCloseGuard()
     #endif
 
     private var mode: ViewMode { ViewMode(rawValue: viewModeRaw) ?? .source }
@@ -37,32 +50,13 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            TabBarView(store: store, onClose: requestClose,
-                       onMove: { WindowRouter.shared.moveToNewWindow($0, from: store) })
-            Divider()
-            if EditorSettings.shared.formattingToolsEnabled {
-                FormattingBar()
-                Divider()
-            }
-            editorRow
-            statusBar
-        }
-        .frame(minWidth: 600, minHeight: 400)
-        .toolbar { toolbar }
-        .focusedSceneValue(\.editorStore, store)
-        .onAppear { setUpWindow(); recomputeWordCount() }
-        // Word count recomputes immediately on document switch, and (debounced) from the
-        // editor's onEdit callback while typing — NOT via an onChange on content, which
-        // would re-evaluate the whole view on every keystroke.
-        .onChange(of: store.selectedID) { _, _ in recomputeWordCount() }
-        #if os(macOS)
-        .onChange(of: controlActiveState) { _, state in
-            if state == .key { WindowRouter.shared.setActive(store) }
-        }
-        #endif
+        root
+            .focusedSceneValue(\.editorStore, store)
         #if !os(macOS)
         .sheet(isPresented: $showSettings) { SettingsView() }
+        .sheet(isPresented: $showTabSwitcher) {
+            TabSwitcherView(store: store, onClose: requestClose)
+        }
         .confirmationDialog("Save changes before closing?",
                             isPresented: Binding(get: { closeCandidate != nil },
                                                  set: { if !$0 { closeCandidate = nil } }),
@@ -94,6 +88,55 @@ struct ContentView: View {
         }
     }
 
+    /// The platform root. macOS: tab strip + editor stack, framed. iOS: a
+    /// NavigationStack so the toolbar (open/save/tabs/…) actually renders — a plain
+    /// window has no navigation bar, so `.navigationBarLeading` / `.principal` /
+    /// `.primaryAction` toolbar placements are silently dropped without one.
+    #if os(macOS)
+    private var root: some View {
+        VStack(spacing: 0) {
+            TabBarView(store: store, onClose: requestClose,
+                       onMove: { WindowRouter.shared.moveToNewWindow($0, from: store) })
+            Divider()
+            if EditorSettings.shared.formattingToolsEnabled {
+                FormattingBar()
+                Divider()
+            }
+            editorRow
+            statusBar
+        }
+        .frame(minWidth: 600, minHeight: 400)
+        .toolbar { toolbar }
+        .background(WindowAccessor { window in
+            guard let window else { return }
+            closeGuard.store = store
+            if window.delegate !== closeGuard { window.delegate = closeGuard }
+        })
+        .onAppear { setUpWindow(); recomputeWordCount() }
+        // Word count recomputes immediately on document switch, and (debounced) from the
+        // editor's onEdit callback while typing — NOT via an onChange on content, which
+        // would re-evaluate the whole view on every keystroke.
+        .onChange(of: store.selectedID) { _, _ in recomputeWordCount() }
+        .onChange(of: controlActiveState) { _, state in
+            if state == .key { WindowRouter.shared.setActive(store) }
+        }
+    }
+    #else
+    private var root: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if EditorSettings.shared.formattingToolsEnabled {
+                    FormattingBar()
+                    Divider()
+                }
+                editorRow
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { toolbar }
+        }
+    }
+    #endif
+
     var defaultExportFilename: String {
         guard let doc = store.selectedDocument else { return "Untitled.md" }
         let base = doc.title
@@ -119,35 +162,54 @@ struct ContentView: View {
                 OutlineSidebar(text: store.selectedDocument?.content ?? "")
                 Divider()
             }
-            editorArea
+            if let doc = store.selectedDocument { editorArea(for: doc) } else { Color.clear }
         }
         #else
-        editorArea
+        // Safari-style tab paging: swipe left/right to switch between open tabs.
+        // No tab strip — the toolbar title + tabs button show and switch tabs.
+        TabView(selection: selectedTabBinding) {
+            ForEach(store.documents) { doc in
+                editorArea(for: doc)
+                    .tag(doc.id)
+            }
+        }
+        .tabViewStyle(.page(indexDisplayMode: .never))
         #endif
     }
 
+    /// The editor for one document. On iOS this is one page of the tab pager;
+    /// on macOS it's the single editor under the tab strip.
     @ViewBuilder
-    var editorArea: some View {
-        if let doc = store.selectedDocument {
-            ZStack {
-                MarkdownEditorView(document: doc, mode: mode, caret: $caret,
-                                   topVisibleIndex: $topVisibleIndex, onEdit: {
-                    // Guard the flag: setting it every keystroke re-notifies observers
-                    // (tab bar, status bar) even when it's already true.
-                    if !doc.isModified { doc.isModified = true }
-                    store.scheduleAutosave(doc)
-                    scheduleWordCount()
-                })
-                .id(doc.id)
+    func editorArea(for doc: Document) -> some View {
+        #if os(macOS)
+        ZStack {
+            MarkdownEditorView(document: doc, mode: mode, caret: $caret,
+                               topVisibleIndex: $topVisibleIndex,
+                               onEdit: {
+                if !doc.isModified { doc.isModified = true }
+                store.scheduleAutosave(doc)
+                scheduleWordCount()
+            })
+            .id(doc.id)
 
-                // Welcome / recents on a fresh empty tab. Disappears once you type.
-                if doc.fileURL == nil, doc.content.isEmpty, !RecentsStore.shared.items.isEmpty {
-                    RecentsWelcomeView(store: store, onOpen: { openAction() })
-                }
+            if doc.fileURL == nil, doc.content.isEmpty, !RecentsStore.shared.items.isEmpty {
+                RecentsWelcomeView(store: store, onOpen: { openAction() })
             }
-        } else {
-            Color.clear
         }
+        #else
+        EditorPageView(doc: doc, store: store, mode: mode,
+                       isActive: store.selectedID == doc.id,
+                       onOpen: { openAction() })
+        .id(doc.id)
+        #endif
+    }
+
+    /// Drives the iOS page switcher (and macOS selection) from the selected doc id.
+    private var selectedTabBinding: Binding<UUID> {
+        Binding(
+            get: { store.selectedID ?? store.documents.first?.id ?? UUID() },
+            set: { store.selectedID = $0 }
+        )
     }
 
     func openAction() {
@@ -157,6 +219,10 @@ struct ContentView: View {
         showOpenPanel = true
         #endif
     }
+
+    /// Resolve the selected document (used by macOS close-guard helpers and the
+    /// toolbar title on iOS).
+    private var currentDoc: Document? { store.selectedDocument }
 
     private func setUpWindow() {
         WindowRouter.shared.register(store)
@@ -225,6 +291,7 @@ struct ContentView: View {
         #endif
     }
 
+    #if os(macOS)
     @ViewBuilder
     var statusBar: some View {
         if EditorSettings.shared.showStatusBar, let doc = store.selectedDocument {
@@ -244,7 +311,9 @@ struct ContentView: View {
             .background(.bar)
         }
     }
+    #endif
 
+    #if os(macOS)
     /// Count words in the selected document now (used on load / document switch).
     private func recomputeWordCount() {
         wordCountWork?.cancel()
@@ -269,24 +338,12 @@ struct ContentView: View {
         if EditorSettings.shared.autosave, doc.fileURL != nil { return "Saving…" }
         return "Edited"
     }
+    #endif
 
     @ToolbarContentBuilder
     var toolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
-            #if !os(macOS)
-            // iOS/iPadOS has no menu bar, so keep Open/Save reachable on the toolbar.
-            Button { openAction() } label: {
-                Label("Open", systemImage: "folder")
-            }
-            .help("Open File")
-
-            Button { saveAction() } label: {
-                Label("Save", systemImage: "square.and.arrow.down")
-            }
-            .disabled(!(store.selectedDocument?.isModified ?? false))
-            .help("Save")
-            #endif
-
+        #if os(macOS)
+        ToolbarItem(placement: .primaryAction) {
             Button {
                 modeBinding.wrappedValue = mode.next
             } label: {
@@ -294,8 +351,9 @@ struct ContentView: View {
             }
             .keyboardShortcut("p", modifiers: [.command, .shift])
             .help("Cycle View: Source → Split → Preview (⌘⇧P)")
+        }
 
-            #if os(macOS)
+        ToolbarItem(placement: .primaryAction) {
             Button {
                 outlineModel.toggle()
             } label: {
@@ -303,9 +361,9 @@ struct ContentView: View {
             }
             .keyboardShortcut("o", modifiers: [.command, .shift])
             .help("Toggle Outline — filter/jump by heading (⌘⇧O)")
-            #endif
+        }
 
-            // Reader ⇄ authoring: surfaced as a button, not buried in Settings.
+        ToolbarItem(placement: .primaryAction) {
             Button {
                 EditorSettings.shared.formattingToolsEnabled.toggle()
             } label: {
@@ -315,19 +373,105 @@ struct ContentView: View {
             .help(EditorSettings.shared.formattingToolsEnabled
                   ? "Authoring mode on — click for reader mode"
                   : "Reader mode — click to enable authoring")
+        }
 
-            #if os(macOS)
+        ToolbarItem(placement: .primaryAction) {
             SettingsLink {
                 Label("Settings", systemImage: "gearshape")
             }
             .help("Settings")
-            #else
-            Button { showSettings = true } label: {
-                Label("Settings", systemImage: "gearshape")
-            }
-            .help("Settings")
-            #endif
         }
+        #else
+        // iOS/iPadOS has no menu bar, so Open/Save must be reachable on the toolbar.
+        // Use separate ToolbarItems — a crowded ToolbarItemGroup silently drops
+        // items on iPhone.
+        ToolbarItem(placement: .navigationBarLeading) {
+            Button { openAction() } label: {
+                Label("Open", systemImage: "folder")
+            }
+            .help("Open File")
+        }
+
+        // The current document's title. Tap to rename (double-click on macOS);
+        // tab switching lives on the Tabs button, not the title.
+        ToolbarItem(placement: .principal) {
+            if renamingTitle {
+                TextField("Title", text: $renameText)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 220)
+                    .focused($titleFieldFocused)
+                    .onSubmit(commitTitleRename)
+                    .onChange(of: titleFieldFocused) { _, focused in
+                        if !focused && renamingTitle { commitTitleRename() }
+                    }
+            } else {
+                Button(action: beginTitleRename) {
+                    Text(store.selectedDocument?.displayTitle ?? "Untitled")
+                        .font(.headline)
+                        .lineLimit(1)
+                }
+                .help("Rename")
+            }
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Button { saveAction() } label: {
+                Label("Save", systemImage: "square.and.arrow.down")
+            }
+            .disabled(!(store.selectedDocument?.isModified ?? false))
+            .help("Save")
+        }
+
+        // The macOS Editor menu's Source / Split / Preview, in a menu — direct
+        // selection with the active mode checkmarked (iOS has no menu bar).
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                ForEach(ViewMode.allCases) { viewMode in
+                    Button {
+                        viewModeRaw = viewMode.rawValue
+                    } label: {
+                        if mode == viewMode {
+                            Label(viewMode.label, systemImage: "checkmark")
+                        } else {
+                            Text(viewMode.label)
+                        }
+                    }
+                }
+            } label: {
+                Label("View", systemImage: mode.symbol)
+            }
+            .help("View: Source, Split, Preview")
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Button { showTabSwitcher = true } label: {
+                Label("Tabs", systemImage: "square.on.square")
+            }
+            .help("Open Tabs")
+        }
+
+        // Authoring toggle + Settings fold into a menu so the trailing group stays
+        // small enough that nothing overflows off the screen.
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Button {
+                    EditorSettings.shared.formattingToolsEnabled.toggle()
+                } label: {
+                    Label(EditorSettings.shared.formattingToolsEnabled
+                          ? "Hide Formatting Toolbar" : "Show Formatting Toolbar",
+                          systemImage: "pencil.circle")
+                }
+                Divider()
+                Button { showSettings = true } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+            } label: {
+                Label("More", systemImage: "ellipsis.circle")
+            }
+            .help("More options")
+        }
+        #endif
     }
 
     func saveCurrentDoc() {
@@ -339,7 +483,110 @@ struct ContentView: View {
             showSavePanel = true
         }
     }
+
+    #if !os(macOS)
+    private func beginTitleRename() {
+        guard let doc = store.selectedDocument else { return }
+        renameText = doc.title
+        renameDoc = doc
+        renamingTitle = true
+        titleFieldFocused = true
+    }
+
+    private func commitTitleRename() {
+        guard renamingTitle else { return }
+        renamingTitle = false
+        titleFieldFocused = false
+        guard let doc = renameDoc else { return }
+        renameDoc = nil
+        let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { doc.title = trimmed }
+    }
+    #endif
 }
+
+#if !os(macOS)
+/// One page in the iOS tab pager. Owns its own caret/scroll state so background
+/// pages don't fight the visible one over a shared status-bar binding.
+private struct EditorPageView: View {
+    var doc: Document
+    var store: EditorStore
+    var mode: ViewMode
+    var isActive: Bool
+    var onOpen: () -> Void
+
+    @State private var caret = CaretPosition()
+    @State private var topVisibleIndex = 0
+    @State private var wordCount = 0
+    @State private var wordCountWork: DispatchWorkItem?
+
+    var body: some View {
+        ZStack {
+            MarkdownEditorView(document: doc, mode: mode, caret: $caret,
+                               topVisibleIndex: $topVisibleIndex,
+                               isActive: isActive,
+                               onEdit: {
+                // Guard the flag: setting it every keystroke re-notifies observers
+                // (status bar, tabs) even when it's already true.
+                if !doc.isModified { doc.isModified = true }
+                store.scheduleAutosave(doc)
+                scheduleWordCount()
+            })
+        }
+        .overlay(alignment: .bottom) {
+            if EditorSettings.shared.showStatusBar {
+                EditorStatusBar(doc: doc, caret: caret, wordCount: wordCount)
+            }
+        }
+        .onChange(of: store.selectedID) { _, _ in
+            if store.selectedID == doc.id { recomputeWordCount() }
+        }
+
+        // Welcome / recents on a fresh empty tab. Disappears once you type.
+        if doc.fileURL == nil, doc.content.isEmpty, !RecentsStore.shared.items.isEmpty {
+            RecentsWelcomeView(store: store, onOpen: onOpen)
+        }
+    }
+
+    private func recomputeWordCount() {
+        wordCountWork?.cancel()
+        wordCount = doc.wordCount
+    }
+
+    /// Recompute the word count 0.4s after the last keystroke, so rapid typing on a
+    /// large document doesn't split the whole string on every character.
+    private func scheduleWordCount() {
+        wordCountWork?.cancel()
+        let work = DispatchWorkItem { [weak doc] in
+            guard let doc else { return }
+            wordCount = doc.wordCount
+        }
+        wordCountWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+}
+
+/// Slim status bar shown at the bottom of each iOS editor page.
+private struct EditorStatusBar: View {
+    var doc: Document
+    var caret: CaretPosition
+    var wordCount: Int
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Text("\(wordCount) words")
+            Spacer()
+            Text(doc.fileTypeLabel)
+                .fontWeight(.medium)
+        }
+        .font(.system(size: 11).monospacedDigit())
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .frame(height: 22)
+        .background(.bar)
+    }
+}
+#endif
 
 // MARK: - Tab Bar
 
@@ -543,6 +790,61 @@ struct RecentsWelcomeView: View {
         .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
     }
 }
+
+// MARK: - Window close guard (macOS)
+
+#if os(macOS)
+/// Intercepts the window's red close button so unsaved documents get a
+/// Save / Don't Save / Cancel prompt before the window (and its `EditorStore`)
+/// is destroyed. Tab-close (`requestClose`) and quit (`applicationShouldTerminate`)
+/// already guard; closing the window itself was the unguarded path.
+final class WindowCloseGuard: NSObject, NSWindowDelegate {
+    weak var store: EditorStore?
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard let store, store.hasUnsavedChanges else { return true }
+        let alert = NSAlert()
+        alert.messageText = store.documents.count == 1
+            ? "Save changes to “\(store.selectedDocument?.title ?? "Untitled")” before closing?"
+            : "You have documents with unsaved changes in this window."
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            for doc in store.documents where doc.isModified {
+                store.selectedID = doc.id
+                store.saveSelected()
+                // Still dirty → the user cancelled a Save As panel; keep the window open.
+                if doc.isModified { return false }
+            }
+            return true
+        case .alertSecondButtonReturn:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+/// Grabs the hosting `NSWindow` out of a SwiftUI background view so `ContentView`
+/// can install a close guard. Setting the window's delegate is safe — SwiftUI
+/// WindowGroup doesn't use the delegate slot for its own close handling.
+struct WindowAccessor: NSViewRepresentable {
+    var windowChanged: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { windowChanged(view.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { windowChanged(nsView.window) }
+    }
+}
+#endif
 
 #Preview {
     ContentView()

@@ -10,6 +10,9 @@ struct MarkdownEditorView: View {
     var mode: ViewMode
     @Binding var caret: CaretPosition
     @Binding var topVisibleIndex: Int
+    /// Whether this is the currently visible page (iOS paging). The editor claims
+    /// the shared action bus only while active, so formatting/find act on it.
+    var isActive: Bool = true
     var onEdit: () -> Void
 
     var contentBinding: Binding<String> {
@@ -37,6 +40,7 @@ struct MarkdownEditorView: View {
                 highlightCurrentLine: settings.highlightCurrentLine,
                 caret: $caret,
                 topVisibleIndex: $topVisibleIndex,
+                isActive: isActive,
                 onEdit: onEdit
             )
             if settings.stickyHeadings {
@@ -69,10 +73,14 @@ struct MarkdownEditorView: View {
             previewPane.frame(minWidth: 200)
         }
         #else
-        HStack(spacing: 0) {
+        // On a phone, split stacks the editor above the preview (side-by-side would
+        // squeeze both to unusable widths).
+        VStack(spacing: 0) {
             editorPane
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             previewPane
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         #endif
     }

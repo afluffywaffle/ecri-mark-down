@@ -309,6 +309,8 @@ struct SyntaxHighlightingEditor: NSViewRepresentable {
     var highlightCurrentLine: Bool
     @Binding var caret: CaretPosition
     @Binding var topVisibleIndex: Int
+    /// Unused on macOS (focus-based bus claiming handles it); kept for signature parity.
+    var isActive: Bool = true
     var onEdit: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -748,6 +750,10 @@ struct SyntaxHighlightingEditor: UIViewRepresentable {
     var highlightCurrentLine: Bool
     @Binding var caret: CaretPosition
     @Binding var topVisibleIndex: Int
+    /// Only the visible page claims the shared action bus, so formatting/find
+    /// act on the tab the user is actually looking at (iOS paging hosts several
+    /// live editors at once).
+    var isActive: Bool = true
     var onEdit: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -778,23 +784,15 @@ struct SyntaxHighlightingEditor: UIViewRepresentable {
         let containerView = EditorContainerView(textView: tv, gutter: gutter)
         applyStyling(container: containerView, context: context)
         Highlighter.apply(to: tv.textStorage, theme: theme, fontSize: fontSize)
-        EditorActionBus.shared.handler = { [weak coord = context.coordinator] action in
-            coord?.performAction(action)
-        }
-        EditorActionBus.shared.scrollHandler = { [weak coord = context.coordinator] index, topInset in
-            coord?.scrollTo(index, topInset: topInset)
-        }
-        EditorActionBus.shared.findHandler = { [weak coord = context.coordinator] tag in
-            coord?.performFind(tag)
-        }
-        EditorActionBus.shared.revealHandler = { [weak coord = context.coordinator] range in
-            coord?.revealRange(range)
-        }
+        context.coordinator.claimBus()
         return containerView
     }
 
     func updateUIView(_ containerView: EditorContainerView, context: Context) {
         context.coordinator.parent = self
+        // Re-claim whenever the page becomes active (selection changed) — the last
+        // page created no longer "wins" the bus just because it was made later.
+        if isActive { context.coordinator.claimBus() }
         let tv = containerView.textView
 
         var didReplaceText = false
@@ -851,6 +849,16 @@ struct SyntaxHighlightingEditor: UIViewRepresentable {
         var pendingEditRange: NSRange?
 
         init(_ parent: SyntaxHighlightingEditor) { self.parent = parent }
+
+        /// Point the global action bus at this editor so the formatting toolbar
+        /// and find/navigation act on the visible page.
+        func claimBus() {
+            let bus = EditorActionBus.shared
+            bus.handler = { [weak self] action in self?.performAction(action) }
+            bus.scrollHandler = { [weak self] index, topInset in self?.scrollTo(index, topInset: topInset) }
+            bus.findHandler = { [weak self] tag in self?.performFind(tag) }
+            bus.revealHandler = { [weak self] range in self?.revealRange(range) }
+        }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
                       replacementText text: String) -> Bool {
