@@ -144,6 +144,37 @@ Design for the watch to prefer direct CloudKit, with the phone relay
 hit container-ID and initialization quirks, so the phone remains the most reliable
 path when it's paired.
 
+## Competition & differentiator
+
+The space exists — dictation-to-a-note on the watch is table stakes. Rough map:
+
+| App | Watch capture | Markdown | macOS editor | Model |
+|---|---|---|---|---|
+| Tot Mini (Iconfactory) | ✓ dictation + Scribble | auto-translates | ✗ — capture app | one-time |
+| Nota | ✓ | vault sync (Pro) | ✗ | subscription |
+| Scratchpad (Sindre Sorhus) | ✓ | ✗ plain text | ~ single note | one-time |
+| SnipNotes / Yellow Note / Watch Notes | ✓ | ✗ | ✗ | free / IAP |
+| **écri mark down (this)** | planned | **native** | **full editor** | **personal** |
+
+The differentiator is the combination, not any single feature:
+
+- **A real Markdown editor on every surface.** The watch is capture-only, but every
+  captured thought is a real, editable Markdown note in a full editor (syntax
+  highlighting, source/preview/split, formatting, themes) on macOS and iOS. Tot
+  translates to Markdown but is a capture app with no editor; Nota's editor is
+  behind a subscription.
+- **No hierarchy, no vault, no plugin system.** Deliberately the anti-Obsidian:
+  no folder tree, no vault, no account, no AI. Open and write.
+- **macOS is the anchor.** A genuinely fast, native Markdown scratchpad for the
+  Mac — the platform most scratchpad apps treat as an afterthought — that the watch
+  feeds into.
+- **Private + no subscription.** CloudKit private DB, your own iCloud, no AI
+  scanning content, no recurring cost.
+
+Honest caveat: this is a personal app, not a market play. The differentiator that
+matters is that it's built to one person's exact workflow — and that workflow
+happens to sit in the macOS-editing-first gap these apps leave open.
+
 ## Entitlements / project changes
 
 - Add the **iCloud** capability with a **CloudKit container** to the app target(s).
