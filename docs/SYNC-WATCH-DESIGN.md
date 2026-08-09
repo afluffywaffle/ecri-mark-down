@@ -1,31 +1,40 @@
 # Sync + Apple Watch — design note
 
-Status: **proposal** — not implemented. Open decisions marked **☐** at the bottom.
+Status: **proposal** — not implemented. Decisions settled at the bottom.
 Companion: `docs/USAGE.md` (user-facing).
 
 ## Goal
 
-Scratchpad notes that sync across macOS, iPhone/iPad, and Apple Watch, with **no
-file hierarchy** — notes are a flat list, true to the product intent. The watch is
-a quick-capture + glance surface. The existing file-based `.md` workflow on macOS
-is preserved as an import/export **gateway**, not replaced.
+One **fast, focused scratchpad** — "something focused on a task and is fast,"
+no fluff. A thought jotted on the Apple Watch syncs and is editable on iPhone and
+Mac. The notes *are* `.md`, so they're portable into heavier tools (Obsidian,
+VS Code, Xcode) — the format is the escape hatch, not a file manager. Distributed
+through the App Store.
 
 ## Constraint that drives everything
 
-The macOS app's identity is "open any `.md` wherever it lives" (Finder, drag-drop,
-security-scoped bookmarks). Sync wants a single canonical store every device
-agrees on. The resolution:
+Every platform has one distinct, minimal job, and they share one store:
 
-- **Synced notes** live in CloudKit records. iPhone, iPad, Watch, and macOS all
-  read/write the same record set. This is the source of truth for synced content.
-- **Local scratch files** stay on macOS exactly as today — tabs over arbitrary
-  paths, **not** synced. This preserves the original lightweight scratchpad.
-- **Import / export** moves content between the two worlds: export a synced note
-  to `.md`, import a `.md` as a synced note. No hidden filesystem imposed on the
-  user.
+- **Apple Watch** — a thought jot. Current pad + "New Scratchpad" (long-press →
+  confirm). Nothing else.
+- **iPhone / iPad** — the synced scratchpad, plus opening other `.md` files for
+  **short edits on the go**.
+- **macOS** — a quick way to open and **look at** a `.md` file. People using
+  Markdown already have the heavy hitters; this is the thing that shows when you
+  ⌘⇥, not something buried inside another app.
 
-So the app has two surfaces, and the line between them is explicit: *records sync,
-files don't.*
+The resolution:
+
+- **The synced scratchpad store is the spine.** One flat set of notes in CloudKit.
+  Watch, iPhone, and Mac all read/write it. Everything in the store syncs.
+- **Opening an arbitrary `.md` is a lightweight, unsynced layer on top** — read /
+  short-edit on macOS and iOS, like opening a doc in a viewer. It is *not* a file
+  manager, and it is *not* the store's source of truth.
+- **Import / export** is the bridge: export a synced note to `.md`, import an
+  external `.md` as a synced note. `.md` stays the portable format throughout.
+
+So the model is one store, not two worlds: *the store syncs; quick `.md` viewing
+is a thin, unsynced convenience around it.*
 
 ## Why CloudKit (private database), not iCloud Drive
 
@@ -51,8 +60,12 @@ Note
 ├─ content     String   (markdown)
 ├─ createdAt   Date
 ├─ updatedAt   Date     (drives ordering + conflict resolution)
-└─ deletedAt   Date?    (soft delete — see below)
+├─ archivedAt  Date?    (rolled off the watch's "current" pad — see watch section)
+└─ deletedAt   Date?    (permanent delete on phone/Mac — soft delete, see below)
 ```
+
+The **current scratchpad** is the note with `archivedAt == nil` (only one ever, by
+construction). The watch shows only it; the phone/Mac show it on top of the archive.
 
 Content is stored inline as a string; a scratchpad note is small, so CloudKit
 records (default ~1 MB each) are more than enough — no `CKAsset` needed.
@@ -94,36 +107,18 @@ debounced-autosave shape the app already has).
 
 ## Platform story
 
-### iOS / iPadOS (primary)
-
-The existing SwiftUI UI stays. Opening/saving a synced note goes through
-`SyncService` instead of the file picker. The file picker remains for importing
-external `.md` into the synced store.
-
-### macOS
-
-Two coexisting modes, distinguished at open time:
-
-- **File tabs** — exactly as today, arbitrary paths, unsynced (original scratchpad).
-- **Synced notes** — read/write the CloudKit store; exportable to `.md`, and a
-  `.md` can be imported.
-
-This is the one real behavioral fork: the macOS app grows a "synced notes" surface
-alongside file tabs. If the user would rather the macOS app become records-only
-(`.md` purely import/export), that's **☐ D1** below.
-
-### Apple Watch
+### Apple Watch — a thought jot
 
 watchOS has CloudKit as a native framework with subscriptions + push, so a watch
 app **can sync directly** — it does not need to relay through the phone. But the
 watch has a tight background budget (strictly limited background tasks/day), so
 direct sync must be **incremental and resumable**, never assumed-complete.
 
-Scoped watch surface (scratchpad-friendly):
+The watch is **one pad and one gesture**:
 
-- **Root = scratchpad, always.** Launching the app opens a fresh capture surface
-  — on the go, the goal is "get a thought down," so capture is the landing, not a
-  list. **☐ D2** covers what to do with an unsaved draft on relaunch.
+- **Root = the current scratchpad.** Launching opens the current pad (the one note
+  with `archivedAt == nil`) — it resumes, not a fresh pad, so a half-typed thought
+  survives wrist-down. There is no list on the watch.
 - **Input: keyboard and voice-to-text from one field.** A focused `TextField`
   brings up the system input UI, which includes the **on-screen QWERTY keyboard**
   (QuickPath swipe + autocorrect) **and** the **dictation mic**. No custom input
@@ -133,16 +128,40 @@ Scoped watch surface (scratchpad-friendly):
     Scribble, no QWERTY — the field still works, input just degrades gracefully.
   - **Dictation is on-device / offline** since watchOS 10, so voice capture works
     with no signal — the exact "on the go" case.
-- **Recents/glance is secondary** — reachable from the scratchpad (button /
-  crown), showing recent notes read-only. Never the landing surface.
-- **No tabs, no view modes, no file management** on the watch.
-- Local mirror of the small working set (few records); full sync when the app
-  wakes, incremental fetch each time.
+- **New scratchpad: long-press → confirm.** A long-press (the watch's native
+  `contextMenu` — gives the haptic for free) offers **"New Scratchpad."** Tapping
+  it archives the current pad (`archivedAt = now`) and opens a fresh empty one.
+  The two-step flow makes an accidental roll impossible; an **empty pad is not
+  archived** (no noise in the archive). The archived pad syncs to iCloud and
+  reappears on iPhone/Mac.
+- **No tabs, no view modes, no file management, no archive browsing** on the watch.
+- Local mirror of the working set (the current pad, a few recent notes); full sync
+  when the app wakes, incremental fetch each time.
 
 Design for the watch to prefer direct CloudKit, with the phone relay
 (`WCSession`) as the low-latency fallback — real-world watch/CloudKit setups have
 hit container-ID and initialization quirks, so the phone remains the most reliable
 path when it's paired.
+
+### iPhone / iPad — the scratchpad, plus quick `.md` edits
+
+- The **synced scratchpad** is the center: current pad on top, archive below, flat
+  list, no hierarchy. Edit in the existing editor (source / preview / split).
+- **Open other `.md` files for short edits on the go** — the file picker stays,
+  but as a lightweight quick-edit layer, not a file manager. Opening an external
+  `.md` lets you read/tweak it and save back; it is not synced, and does not join
+  the store unless the user imports it.
+
+### macOS — quick open and look at a `.md`
+
+- **The fast view/edit surface.** Open a `.md` (⌘⇥ first, ⌘O, drag onto the Dock
+  icon) and *look* — this is the lightweight native viewer that shows when you
+  ⌘⇥, not something buried inside another app. It is deliberately not a project
+  editor, not Xcode/VS Code/Obsidian.
+- **Synced notes read/write the CloudKit store** too — same store as the phone and
+  watch; export to `.md` or import an external `.md` as a synced note.
+- No file-manager ambition: quick open/view/short-edit, not tab farms over
+  arbitrary paths.
 
 ## Competition & differentiator
 
@@ -154,7 +173,7 @@ The space exists — dictation-to-a-note on the watch is table stakes. Rough map
 | Nota | ✓ | vault sync (Pro) | ✗ | subscription |
 | Scratchpad (Sindre Sorhus) | ✓ | ✗ plain text | ~ single note | one-time |
 | SnipNotes / Yellow Note / Watch Notes | ✓ | ✗ | ✗ | free / IAP |
-| **écri mark down (this)** | planned | **native** | **full editor** | **personal** |
+| **écri mark down (this)** | planned | **native** | **fast ⌘⇥ viewer** | **personal** |
 
 The differentiator is the combination, not any single feature:
 
@@ -165,9 +184,10 @@ The differentiator is the combination, not any single feature:
   behind a subscription.
 - **No hierarchy, no vault, no plugin system.** Deliberately the anti-Obsidian:
   no folder tree, no vault, no account, no AI. Open and write.
-- **macOS is the anchor.** A genuinely fast, native Markdown scratchpad for the
-  Mac — the platform most scratchpad apps treat as an afterthought — that the watch
-  feeds into.
+- **macOS is the fast ⌘⇥ viewer.** The lightweight thing that shows when you
+  switch apps to glance at a `.md` — most scratchpad apps treat the Mac as an
+  afterthought (a dot, a list), and the heavy `.md` editors are Xcode / VS Code /
+  Obsidian. This sits in the middle: fast to open, native, no project ceremony.
 - **Private + no subscription.** CloudKit private DB, your own iCloud, no AI
   scanning content, no recurring cost.
 
@@ -184,40 +204,40 @@ happens to sit in the macOS-editing-first gap these apps leave open.
 
 ## Phases
 
-1. **Sync core (iOS + macOS)** — container, `SyncService`, record mapping, import/
-   export gateway, soft delete, LWW conflicts.
-2. **macOS synced-notes surface** — resolves ☐ D1; pick tab-vs-record UX.
-3. **Watch app** — scratchpad-root capture (keyboard + dictation via one field),
-   recents glance, local mirror, direct CloudKit + WCSession fallback, incremental
-   background sync.
-4. **Polish** — offline edge cases, multi-window truth, migration from the current
+1. **Sync core (iOS + macOS)** — container, `SyncService`, record mapping, current-
+   pad + archive model, soft delete, LWW conflicts.
+2. **macOS quick `.md` viewer + synced notes** — fast open/look, store reads/writes,
+   import/export bridge.
+3. **iPhone scratchpad UI** — current pad on top, archive below, flat list; external
+   `.md` quick-edit.
+4. **Watch app** — current pad + long-press "New Scratchpad", keyboard + dictation,
+   local mirror, direct CloudKit + WCSession fallback, incremental background sync.
+5. **Polish** — offline edge cases, multi-window truth, migration from the current
    file-only workflow.
 
-## Open decisions
+## Decisions (settled)
 
-- **☐ D1 — macOS truth model.** Recommended: *records sync, files don't* (two
-  surfaces, `.md` as gateway). Alternative: macOS becomes records-only, `.md` is
-  import/export. Affects phase 2.
-- **☐ D2 — Watch draft behavior on relaunch.** Root = scratchpad is locked. Open
-  question: relaunch always starts a **fresh** capture (clean slate, matches "open
-  to a scratchpad"), while any **unsaved** draft from the last session is preserved
-  (recoverable, never silently dropped) — e.g. surfaced in recents marked "Draft"
-  with tap-to-return and discard. Recommended: fresh capture + preserved-draft
-  recovery. Alternative: resume the last unsaved draft directly. Watch apps are
-  dismissed by wrist-down mid-capture, so an in-progress thought must survive even
-  though launch shows a clean pad.
-- **☐ D3 — What syncs.** Every note in the store, or only a "synced" subset?
-  Recommended: everything in the CloudKit store syncs; local files never do.
+- **D1 — macOS role.** Quick open-and-look at `.md` (⌘⇥-visible, lightweight) plus
+  synced-store reads/writes. Not records-only, not a file manager.
+- **D2 — Watch draft behavior.** Relaunch **resumes the current pad** — it is the
+  rolling scratchpad, not a fresh pad. Rolling to a new one is long-press →
+  confirm "New Scratchpad" → archive current → fresh empty pad; empty pads are
+  not archived.
+- **D3 — What syncs.** Everything in the CloudKit store syncs; quick-opened `.md`
+  files never do.
 
 ## Risks
 
-- **Split-brain (records vs files)** is the main one — mitigated by the explicit
-  import/export gateway and by never auto-migrating files into records.
+- **The store vs quick-opened `.md` could drift** — mitigated by keeping quick-open
+  explicitly unsynced and by the import/export bridge; never auto-migrating files
+  into records.
+- **Accidental roll on the watch** — mitigated by the two-step long-press →
+  confirm, and by never archiving an empty pad.
 - **watchOS background budget** — mitigated by incremental/resumable sync and a
   phone fallback.
 - **CloudKit container config bugs on watch** (seen in the field) — mitigate by
   using one shared container ID and testing the watch path early.
-- Scope creep on the watch — the capture + glance line is a deliberate wall.
+- Scope creep on the watch — the one-pad + one-gesture line is a deliberate wall.
 
 ## References
 
