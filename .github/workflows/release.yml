@@ -1,0 +1,85 @@
+name: Release
+
+# Builds the app on a GitHub-hosted macOS runner and attaches the binary
+# to a GitHub Release. Triggered by pushing a version tag (e.g. v1.0.0),
+# or manually from the Actions tab.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create the Release and upload the .zip
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        run: |
+          # Pick the highest Xcode_*.app the runner ships; fall back to default.
+          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$LATEST" ]; then sudo xcode-select -s "$LATEST"; fi
+          xcodebuild -version
+
+      # The scheme name "écri mark down" is stored NFD-decomposed on disk.
+      # Capturing it from -list avoids the NFC/NFD mismatch that makes a
+      # typed -scheme "écri mark down" fail with "does not contain a scheme".
+      - name: Capture exact scheme name
+        id: scheme
+        run: |
+          SCHEME=$(xcodebuild -list -project "écri mark down.xcodeproj" \
+            | awk '/Schemes:/{getline; gsub(/^[ \t]+/,""); print; exit}')
+          echo "name=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "Scheme: $SCHEME"
+
+      # Archive unsigned. MACOSX_DEPLOYMENT_TARGET is overridden to 14.0
+      # because the project is set to 27.0 (Xcode-beta default) and no
+      # runner has that SDK. The source uses no 26/27-only APIs.
+      - name: Archive (unsigned)
+        run: |
+          xcodebuild archive \
+            -project "écri mark down.xcodeproj" \
+            -scheme "${{ steps.scheme.outputs.name }}" \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -archivePath "build/ecri.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            MACOSX_DEPLOYMENT_TARGET=14.0
+
+      - name: Zip the .app
+        id: package
+        run: |
+          APP=$(find "build/ecri.xcarchive/Products/Applications" -maxdepth 1 -name '*.app' | head -1)
+          echo "Found app: $APP"
+          ZIP="ecri-mark-down-macos.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      # For tag pushes, create/attach to the matching Release.
+      # For manual runs, this step is skipped (nothing to tag).
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            "${{ steps.package.outputs.zip }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            --verify-tag || \
+          gh release upload "${{ github.ref_name }}" \
+            "${{ steps.package.outputs.zip }}" --clobber
+
+      # Manual runs still get the binary as a downloadable artifact.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecri-mark-down-macos
+          path: ${{ steps.package.outputs.zip }}

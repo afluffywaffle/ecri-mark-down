@@ -10,6 +10,9 @@ struct MarkdownEditorView: View {
     var mode: ViewMode
     @Binding var caret: CaretPosition
     @Binding var topVisibleIndex: Int
+    /// Whether this is the currently visible page (iOS paging). The editor claims
+    /// the shared action bus only while active, so formatting/find act on it.
+    var isActive: Bool = true
     var onEdit: () -> Void
 
     var contentBinding: Binding<String> {
@@ -37,6 +40,7 @@ struct MarkdownEditorView: View {
                 highlightCurrentLine: settings.highlightCurrentLine,
                 caret: $caret,
                 topVisibleIndex: $topVisibleIndex,
+                isActive: isActive,
                 onEdit: onEdit
             )
             if settings.stickyHeadings {
@@ -52,7 +56,9 @@ struct MarkdownEditorView: View {
     var previewPane: some View {
         let settings = EditorSettings.shared
         return ScrollView {
-            MarkdownPreviewView(text: document.content, useSerif: settings.useSerifPreview)
+            MarkdownPreviewView(text: document.content,
+                                useSerif: settings.useSerifPreview,
+                                baseDirectoryURL: document.fileURL?.deletingLastPathComponent())
                 .padding(20)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -67,10 +73,14 @@ struct MarkdownEditorView: View {
             previewPane.frame(minWidth: 200)
         }
         #else
-        HStack(spacing: 0) {
+        // On a phone, split stacks the editor above the preview (side-by-side would
+        // squeeze both to unusable widths).
+        VStack(spacing: 0) {
             editorPane
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             previewPane
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         #endif
     }
@@ -85,8 +95,29 @@ struct MDHeading: Identifiable {
     var charIndex: Int { id }
 }
 
+/// One-entry memo for `parseHeadings` — it's called several times per keystroke
+/// (sticky-headings view + gutter sticky band) with the identical document string;
+/// caching the last (input → result) collapses those to a single scan.
+private final class HeadingCache {
+    static let shared = HeadingCache()
+    private var input: String?
+    private var result: [MDHeading] = []
+
+    func headings(for source: String, compute: (String) -> [MDHeading]) -> [MDHeading] {
+        if let input, input == source { return result }   // memcmp — far cheaper than a scan
+        let r = compute(source)
+        input = source
+        result = r
+        return r
+    }
+}
+
 /// Extract ATX headings with their character offsets, ignoring fenced code blocks.
 func parseHeadings(_ source: String) -> [MDHeading] {
+    HeadingCache.shared.headings(for: source, compute: parseHeadingsUncached)
+}
+
+private func parseHeadingsUncached(_ source: String) -> [MDHeading] {
     var result: [MDHeading] = []
     let ns = source as NSString
     var inFence = false
@@ -283,7 +314,15 @@ private enum MBlock {
     case codeBlock(lang: String, code: String)
     case blockquote(text: String)
     case listItem(ordered: Bool, index: Int, text: String)
+    /// A GFM task-list item ("- [ ] foo" / "- [x] foo").
+    case taskItem(checked: Bool, text: String)
     case horizontalRule
+    case image(alt: String, url: String)
+    case table(alignments: [TableAlignment], headers: [String], rows: [[String]])
+}
+
+private enum TableAlignment {
+    case leading, center, trailing
 }
 
 // MARK: - Block parser
@@ -344,6 +383,31 @@ private enum BlockParser {
                 continue
             }
 
+            // GFM table: a "| a | b |" header row followed by a "|---|:--:|" separator row
+            if trimmed.hasPrefix("|"), i + 1 < lines.count,
+               let alignments = tableSeparator(lines[i + 1]) {
+                flushPara()
+                let headers = splitRow(trimmed)
+                i += 2
+                var rows: [[String]] = []
+                while i < lines.count {
+                    let rowTrimmed = lines[i].trimmingCharacters(in: .whitespaces)
+                    guard rowTrimmed.hasPrefix("|") else { break }
+                    rows.append(splitRow(rowTrimmed))
+                    i += 1
+                }
+                result.append(.table(alignments: alignments, headers: headers, rows: rows))
+                continue
+            }
+
+            // Standalone image line: "![alt](url)"
+            if let (alt, url) = standaloneImage(trimmed) {
+                flushPara()
+                result.append(.image(alt: alt, url: url))
+                i += 1
+                continue
+            }
+
             // Blockquote
             if line.hasPrefix("> ") || trimmed == ">" {
                 flushPara()
@@ -358,11 +422,15 @@ private enum BlockParser {
                 continue
             }
 
-            // Unordered list item
+            // Unordered list item (with GFM task-list checkbox support)
             if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
                 flushPara()
-                result.append(.listItem(ordered: false, index: 0,
-                                        text: String(line.dropFirst(2))))
+                let rest = String(line.dropFirst(2))
+                if let (checked, text) = taskItemPrefix(rest) {
+                    result.append(.taskItem(checked: checked, text: text))
+                } else {
+                    result.append(.listItem(ordered: false, index: 0, text: rest))
+                }
                 i += 1
                 continue
             }
@@ -390,6 +458,82 @@ private enum BlockParser {
         return result
     }
 
+    /// "[ ] rest" / "[x] rest" (case-insensitive checkmark) → (checked, rest).
+    private static func taskItemPrefix(_ s: String) -> (Bool, String)? {
+        guard s.hasPrefix("["), s.count >= 4 else { return nil }
+        let chars = Array(s)
+        guard chars[2] == "]", chars[3] == " " else { return nil }
+        let mark = chars[1]
+        guard mark == " " || mark == "x" || mark == "X" else { return nil }
+        return (mark != " ", String(chars.dropFirst(4)))
+    }
+
+    /// Standalone "![alt](url)" line with nothing else on it.
+    private static func standaloneImage(_ trimmed: String) -> (String, String)? {
+        guard trimmed.hasPrefix("!["), trimmed.hasSuffix(")") else { return nil }
+        guard let closeBracket = trimmed.firstIndex(of: "]"),
+              trimmed.index(after: closeBracket) < trimmed.endIndex,
+              trimmed[trimmed.index(after: closeBracket)] == "("
+        else { return nil }
+        let alt = String(trimmed[trimmed.index(trimmed.startIndex, offsetBy: 2)..<closeBracket])
+        let urlStart = trimmed.index(closeBracket, offsetBy: 2)
+        let urlEnd = trimmed.index(before: trimmed.endIndex)
+        guard urlStart <= urlEnd else { return nil }
+        var url = String(trimmed[urlStart..<urlEnd])
+        // Strip an optional trailing title: url "some title"
+        if let quoteIdx = url.firstIndex(of: "\"") {
+            url = String(url[..<quoteIdx]).trimmingCharacters(in: .whitespaces)
+        }
+        return (alt, url)
+    }
+
+    /// A table separator row like "|---|:--:|---:|"; returns per-column alignment, or nil if not one.
+    private static func tableSeparator(_ line: String) -> [TableAlignment]? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("|") else { return nil }
+        let cells = splitRow(trimmed)
+        guard !cells.isEmpty else { return nil }
+        var result: [TableAlignment] = []
+        for cell in cells {
+            let c = cell.trimmingCharacters(in: .whitespaces)
+            guard !c.isEmpty, c.allSatisfy({ $0 == "-" || $0 == ":" }), c.contains("-") else { return nil }
+            let left = c.hasPrefix(":")
+            let right = c.hasSuffix(":")
+            if left && right { result.append(.center) }
+            else if right { result.append(.trailing) }
+            else { result.append(.leading) }
+        }
+        return result
+    }
+
+    /// Split a "| a | b |" row into trimmed cell strings, honoring `\|` as a literal pipe.
+    private static func splitRow(_ line: String) -> [String] {
+        var cells: [String] = []
+        var current = ""
+        var chars = Array(line)
+        var idx = 0
+        // Drop a single leading/trailing "|" (GFM rows are optionally pipe-delimited).
+        if chars.first == "|" { chars.removeFirst() }
+        if chars.last == "|" { chars.removeLast() }
+        while idx < chars.count {
+            let ch = chars[idx]
+            if ch == "\\", idx + 1 < chars.count, chars[idx + 1] == "|" {
+                current.append("|")
+                idx += 2
+                continue
+            }
+            if ch == "|" {
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(ch)
+            }
+            idx += 1
+        }
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+        return cells
+    }
+
     private static func orderedPrefix(_ line: String) -> (Int, String)? {
         var j = line.startIndex
         while j < line.endIndex, line[j].isNumber { j = line.index(after: j) }
@@ -408,6 +552,8 @@ private enum BlockParser {
 struct MarkdownPreviewView: View {
     var text: String
     var useSerif: Bool = false
+    /// The document's on-disk directory, used to resolve relative image paths.
+    var baseDirectoryURL: URL?
 
     private var blocks: [MBlock] { BlockParser.parse(text) }
 
@@ -468,9 +614,121 @@ struct MarkdownPreviewView: View {
             }
             .padding(.vertical, 1)
 
+        case .taskItem(let checked, let text):
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: checked ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(checked ? Color.accentColor : Color.secondary)
+                    .frame(minWidth: 20, alignment: .trailing)
+                Text(inline(text))
+                    .strikethrough(checked, color: .secondary)
+                    .foregroundStyle(checked ? .secondary : .primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 1)
+
+        case .image(let alt, let url):
+            imageView(alt: alt, url: url)
+                .padding(.vertical, 6)
+
+        case .table(let alignments, let headers, let rows):
+            tableView(alignments: alignments, headers: headers, rows: rows)
+                .padding(.vertical, 6)
+
         case .horizontalRule:
             Divider()
                 .padding(.vertical, 10)
+        }
+    }
+
+    @ViewBuilder
+    private func imageView(alt: String, url: String) -> some View {
+        if let resolved = resolveImageURL(url) {
+            AsyncImage(url: resolved) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 480, maxHeight: 360, alignment: .leading)
+                case .failure:
+                    brokenImagePlaceholder(alt)
+                case .empty:
+                    ProgressView().frame(height: 40)
+                @unknown default:
+                    brokenImagePlaceholder(alt)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            brokenImagePlaceholder(alt)
+        }
+    }
+
+    private func brokenImagePlaceholder(_ alt: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "photo")
+            Text(alt.isEmpty ? "Image" : alt)
+        }
+        .foregroundStyle(.secondary)
+        .padding(10)
+        .background(.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// Resolve an image reference (remote URL or a path relative to the document's file)
+    /// to a URL AsyncImage can load. Local relative paths are resolved against the
+    /// document's on-disk directory when known.
+    private func resolveImageURL(_ raw: String) -> URL? {
+        if let url = URL(string: raw), url.scheme != nil {
+            return url
+        }
+        if let base = baseDirectoryURL {
+            return URL(fileURLWithPath: raw, relativeTo: base).absoluteURL
+        }
+        return URL(fileURLWithPath: raw)
+    }
+
+    @ViewBuilder
+    private func tableView(alignments: [TableAlignment], headers: [String], rows: [[String]]) -> some View {
+        let columnCount = max(headers.count, alignments.count)
+        Grid(alignment: .topLeading, horizontalSpacing: 14, verticalSpacing: 8) {
+            GridRow {
+                ForEach(Array(headers.enumerated()), id: \.offset) { col, cell in
+                    Text(inline(cell))
+                        .font(.system(.body, weight: .semibold))
+                        .multilineTextAlignment(textAlignment(for: col, in: alignments))
+                        .frame(maxWidth: .infinity, alignment: gridAlignment(for: col, in: alignments))
+                }
+            }
+            Divider().gridCellColumns(max(columnCount, 1))
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                GridRow {
+                    ForEach(0..<columnCount, id: \.self) { col in
+                        Text(inline(col < row.count ? row[col] : ""))
+                            .multilineTextAlignment(textAlignment(for: col, in: alignments))
+                            .frame(maxWidth: .infinity, alignment: gridAlignment(for: col, in: alignments))
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(.secondary.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func textAlignment(for col: Int, in alignments: [TableAlignment]) -> TextAlignment {
+        guard col < alignments.count else { return .leading }
+        switch alignments[col] {
+        case .leading: return .leading
+        case .center: return .center
+        case .trailing: return .trailing
+        }
+    }
+
+    private func gridAlignment(for col: Int, in alignments: [TableAlignment]) -> Alignment {
+        guard col < alignments.count else { return .leading }
+        switch alignments[col] {
+        case .leading: return .leading
+        case .center: return .center
+        case .trailing: return .trailing
         }
     }
 

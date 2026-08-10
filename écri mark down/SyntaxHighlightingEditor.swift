@@ -91,21 +91,64 @@ enum Highlighter {
         }
     }
 
+    /// Full-document highlight. Use on load, theme/font changes, and bulk edits.
     static func apply(to storage: NSTextStorage, theme: EditorTheme, fontSize: CGFloat) {
-        let str = storage.string
-        guard !str.isEmpty else { return }
-        let full = NSRange(location: 0, length: (str as NSString).length)
+        let ns = storage.string as NSString
+        guard ns.length > 0 else { return }
+        highlight(storage, theme: theme, fontSize: fontSize, range: NSRange(location: 0, length: ns.length))
+    }
 
+    /// Incremental highlight for the hot typing path: re-highlight only `editedRange`,
+    /// expanded to whole lines (and to any fenced code block it touches so ``` stays
+    /// correct). Avoids re-attributing — and thus relaying out — the whole document.
+    static func apply(to storage: NSTextStorage, theme: EditorTheme, fontSize: CGFloat,
+                      editedRange: NSRange) {
+        let ns = storage.string as NSString
+        guard ns.length > 0 else { return }
+        let loc = min(max(editedRange.location, 0), ns.length)
+        let len = min(max(editedRange.length, 0), ns.length - loc)
+        var range = ns.lineRange(for: NSRange(location: loc, length: len))
+        range = expandToFences(ns, range: range)
+        highlight(storage, theme: theme, fontSize: fontSize, range: range)
+    }
+
+    private static func highlight(_ storage: NSTextStorage, theme: EditorTheme,
+                                  fontSize: CGFloat, range: NSRange) {
+        let str = storage.string
         storage.beginEditing()
-        storage.setAttributes([.font: baseFont(fontSize), .foregroundColor: theme.foreground], range: full)
+        storage.setAttributes([.font: baseFont(fontSize), .foregroundColor: theme.foreground], range: range)
         for rule in rules {
             let attrs = attributes(for: rule.role, theme: theme, size: fontSize)
-            rule.regex.enumerateMatches(in: str, range: full) { match, _, _ in
+            rule.regex.enumerateMatches(in: str, range: range) { match, _, _ in
                 guard let r = match?.range else { return }
                 storage.addAttributes(attrs, range: r)
             }
         }
         storage.endEditing()
+    }
+
+    /// Grow `range` to swallow any fenced code block it intersects, so a multi-line
+    /// ``` fence is always re-highlighted as a whole. Fast-paths documents with no fences.
+    private static func expandToFences(_ ns: NSString, range: NSRange) -> NSRange {
+        if ns.range(of: "```").location == NSNotFound { return range }
+        var markers: [Int] = []
+        ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length),
+                               options: [.byLines, .substringNotRequired]) { _, lineRange, _, _ in
+            if ns.substring(with: lineRange).trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                markers.append(lineRange.location)
+            }
+        }
+        var lo = range.location
+        var hi = range.location + range.length
+        var i = 0
+        while i + 1 < markers.count {            // pair open/close fence markers
+            let start = markers[i]
+            let closeLine = ns.lineRange(for: NSRange(location: markers[i + 1], length: 0))
+            let end = closeLine.location + closeLine.length
+            if start < hi && end > lo { lo = min(lo, start); hi = max(hi, end) }
+            i += 2
+        }
+        return NSRange(location: lo, length: hi - lo)
     }
 }
 
@@ -122,6 +165,16 @@ final class LineHighlightTextView: NSTextView {
     /// Called when a file is dropped onto the editor (so we open it instead of
     /// inserting its path as text).
     var onFileDrop: (([URL]) -> Void)?
+
+    /// Handle File ▸ Print (⌘P). The standard menu sends `printDocument:` down the
+    /// responder chain; without a handler here it bubbles to NSApplication, which shows
+    /// "This application does not support printing." We route it to our paginating printer.
+    @objc func printDocument(_ sender: Any?) {
+        let title = (window?.title.replacingOccurrences(of: "• ", with: "")).flatMap {
+            $0.isEmpty ? nil : $0
+        } ?? "Untitled"
+        MarkdownPrinter.print(content: string, title: title)
+    }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let opts: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
@@ -256,6 +309,8 @@ struct SyntaxHighlightingEditor: NSViewRepresentable {
     var highlightCurrentLine: Bool
     @Binding var caret: CaretPosition
     @Binding var topVisibleIndex: Int
+    /// Unused on macOS (focus-based bus claiming handles it); kept for signature parity.
+    var isActive: Bool = true
     var onEdit: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -331,7 +386,11 @@ struct SyntaxHighlightingEditor: NSViewRepresentable {
         guard let tv = containerView.scroll.documentView as? LineHighlightTextView else { return }
 
         var didReplaceText = false
-        if !context.coordinator.isUpdating, tv.string != text {
+        // The update that immediately follows a local keystroke is just SwiftUI echoing
+        // the text we already have — skip the O(n) whole-string compare in that case.
+        if context.coordinator.skipTextSyncOnce {
+            context.coordinator.skipTextSyncOnce = false
+        } else if !context.coordinator.isUpdating, tv.string != text {
             let saved = tv.selectedRanges
             tv.string = text
             let len = (tv.string as NSString).length
@@ -390,8 +449,21 @@ struct SyntaxHighlightingEditor: NSViewRepresentable {
         weak var container: MacEditorContainer?
         weak var textView: NSTextView?
         var styleSignature = ""
+        /// Range affected by the in-flight edit, captured in `shouldChangeTextIn`, so
+        /// `textDidChange` can re-highlight just that region instead of the whole doc.
+        var pendingEditRange: NSRange?
+        /// Set after a local edit so the following `updateNSView` skips the expensive
+        /// whole-document text comparison (the binding just echoes what we already have).
+        var skipTextSyncOnce = false
 
         init(_ parent: SyntaxHighlightingEditor) { self.parent = parent }
+
+        func textView(_ view: NSTextView, shouldChangeTextIn affectedCharRange: NSRange,
+                      replacementString: String?) -> Bool {
+            pendingEditRange = NSRange(location: affectedCharRange.location,
+                                       length: (replacementString as NSString?)?.length ?? 0)
+            return true
+        }
 
         /// Point the global action bus at this (focused) editor, so formatting,
         /// find, and navigation act on the window the user is actually in.
@@ -411,9 +483,14 @@ struct SyntaxHighlightingEditor: NSViewRepresentable {
             parent.text = tv.string
             parent.onEdit()
             isUpdating = false
+            skipTextSyncOnce = true
             if let s = tv.textStorage {
                 let theme = parent.theme, size = parent.fontSize
-                DispatchQueue.main.async { Highlighter.apply(to: s, theme: theme, fontSize: size) }
+                let editRange = pendingEditRange ?? tv.selectedRange()
+                pendingEditRange = nil
+                DispatchQueue.main.async {
+                    Highlighter.apply(to: s, theme: theme, fontSize: size, editedRange: editRange)
+                }
             }
             gutter?.needsDisplay = true
             reportCaret(tv)
@@ -673,6 +750,10 @@ struct SyntaxHighlightingEditor: UIViewRepresentable {
     var highlightCurrentLine: Bool
     @Binding var caret: CaretPosition
     @Binding var topVisibleIndex: Int
+    /// Only the visible page claims the shared action bus, so formatting/find
+    /// act on the tab the user is actually looking at (iOS paging hosts several
+    /// live editors at once).
+    var isActive: Bool = true
     var onEdit: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -703,23 +784,15 @@ struct SyntaxHighlightingEditor: UIViewRepresentable {
         let containerView = EditorContainerView(textView: tv, gutter: gutter)
         applyStyling(container: containerView, context: context)
         Highlighter.apply(to: tv.textStorage, theme: theme, fontSize: fontSize)
-        EditorActionBus.shared.handler = { [weak coord = context.coordinator] action in
-            coord?.performAction(action)
-        }
-        EditorActionBus.shared.scrollHandler = { [weak coord = context.coordinator] index, topInset in
-            coord?.scrollTo(index, topInset: topInset)
-        }
-        EditorActionBus.shared.findHandler = { [weak coord = context.coordinator] tag in
-            coord?.performFind(tag)
-        }
-        EditorActionBus.shared.revealHandler = { [weak coord = context.coordinator] range in
-            coord?.revealRange(range)
-        }
+        context.coordinator.claimBus()
         return containerView
     }
 
     func updateUIView(_ containerView: EditorContainerView, context: Context) {
         context.coordinator.parent = self
+        // Re-claim whenever the page becomes active (selection changed) — the last
+        // page created no longer "wins" the bus just because it was made later.
+        if isActive { context.coordinator.claimBus() }
         let tv = containerView.textView
 
         var didReplaceText = false
@@ -772,8 +845,26 @@ struct SyntaxHighlightingEditor: UIViewRepresentable {
         var isUpdating = false
         weak var container: EditorContainerView?
         var styleSignature = ""
+        /// Range of the in-flight edit, so `textViewDidChange` can re-highlight only it.
+        var pendingEditRange: NSRange?
 
         init(_ parent: SyntaxHighlightingEditor) { self.parent = parent }
+
+        /// Point the global action bus at this editor so the formatting toolbar
+        /// and find/navigation act on the visible page.
+        func claimBus() {
+            let bus = EditorActionBus.shared
+            bus.handler = { [weak self] action in self?.performAction(action) }
+            bus.scrollHandler = { [weak self] index, topInset in self?.scrollTo(index, topInset: topInset) }
+            bus.findHandler = { [weak self] tag in self?.performFind(tag) }
+            bus.revealHandler = { [weak self] range in self?.revealRange(range) }
+        }
+
+        func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
+                      replacementText text: String) -> Bool {
+            pendingEditRange = NSRange(location: range.location, length: (text as NSString).length)
+            return true
+        }
 
         func textViewDidChange(_ textView: UITextView) {
             guard !isUpdating else { return }
@@ -782,7 +873,11 @@ struct SyntaxHighlightingEditor: UIViewRepresentable {
             parent.onEdit()
             isUpdating = false
             let theme = parent.theme, size = parent.fontSize
-            DispatchQueue.main.async { Highlighter.apply(to: textView.textStorage, theme: theme, fontSize: size) }
+            let editRange = pendingEditRange ?? textView.selectedRange
+            pendingEditRange = nil
+            DispatchQueue.main.async {
+                Highlighter.apply(to: textView.textStorage, theme: theme, fontSize: size, editedRange: editRange)
+            }
             container?.gutter.setNeedsDisplay()
             updateCurrentLine()
             reportCaret(textView)

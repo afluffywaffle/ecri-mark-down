@@ -4,9 +4,14 @@ import UniformTypeIdentifiers
 import AppKit
 #endif
 
-/// Value used to open a window carrying an optional file to load (nil = blank session).
+/// Value used to open a window. A nil payload is a blank session; a `bookmark`
+/// opens a file; `content` carries an in-memory document (e.g. a tab torn off to
+/// its own window, preserving unsaved edits).
 struct PendingOpen: Codable, Hashable {
     var bookmark: Data?
+    var title: String?
+    var content: String?
+    var isModified: Bool?
 }
 
 /// Exposes the focused window's document store to menu commands.
@@ -30,15 +35,45 @@ final class WindowRouter {
     weak var activeStore: EditorStore?
     let stores = NSHashTable<EditorStore>.weakObjects()
 
+    /// Files requested (e.g. via Finder-open at cold launch) before any window
+    /// has wired up the router. Flushed into the first window once it registers.
+    private var pendingOpens: [URL] = []
+
+    /// True once any window has finished appearing. Before that, both direct
+    /// store opens and `openWindow(value:)` are unreliable — SwiftUI can drop
+    /// openWindow calls made before the scene phase is active, which is how a
+    /// cold Finder-open could end up showing only a blank untitled window.
+    private var windowHasRegistered = false
+
     func register(_ store: EditorStore) {
         stores.add(store)
         activeStore = store
+        windowHasRegistered = true
+    }
+
+    /// Called once a window has finished wiring up (`openWindow` set). Opens any
+    /// files that arrived before the router was ready into the now-active window.
+    func flushPendingOpens() {
+        guard !pendingOpens.isEmpty, let store = activeStore else { return }
+        let urls = pendingOpens
+        pendingOpens.removeAll()
+        // Open into the existing (initially blank) window so a cold Finder-open
+        // shows the file here instead of dropping it and leaving a blank window.
+        urls.forEach { store.open(url: $0) }
     }
 
     func setActive(_ store: EditorStore) { activeStore = store }
 
     /// Open a file honoring the "new tab vs new window" preference.
     func openFile(url: URL) {
+        // No window has appeared yet (Finder-open during cold launch). Even if
+        // `openWindow` happens to be set, calling it this early can be silently
+        // dropped by SwiftUI, leaving a blank untitled window and no file.
+        // Queue it; flushPendingOpens() delivers it once a window registers.
+        guard windowHasRegistered else {
+            pendingOpens.append(url)
+            return
+        }
         if EditorSettings.shared.openInNewWindow {
             openInNewWindow(url)
         } else if let store = activeStore {
@@ -53,6 +88,21 @@ final class WindowRouter {
         openFile(url: url)
     }
 
+    /// Tear a tab out of its window into a new one, preserving unsaved edits and
+    /// (via a stored bookmark) write access to its file.
+    func moveToNewWindow(_ doc: Document, from store: EditorStore) {
+        guard let openWindow else { return }
+        var po = PendingOpen()
+        po.title = doc.title
+        po.content = doc.content
+        po.isModified = doc.isModified
+        if let url = doc.fileURL {
+            po.bookmark = RecentsStore.shared.bookmark(for: url)
+        }
+        store.close(doc)
+        openWindow(po)
+    }
+
     private func openInNewWindow(_ url: URL) {
         guard let openWindow else { activeStore?.open(url: url); return }
         let accessed = url.startAccessingSecurityScopedResource()
@@ -63,6 +113,17 @@ final class WindowRouter {
         #else
         let bm = try? url.bookmarkData()
         #endif
+        guard let bm else {
+            // Couldn't make a bookmark to carry the file across the window
+            // boundary — a nil payload would open a blank session. Fall back to
+            // a tab in the active window (or queue for the next one) instead.
+            if let store = activeStore {
+                store.open(url: url)
+            } else {
+                pendingOpens.append(url)
+            }
+            return
+        }
         openWindow(PendingOpen(bookmark: bm))
     }
 

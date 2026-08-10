@@ -35,6 +35,11 @@ final class RecentsStore {
         save()
     }
 
+    /// The stored security-scoped bookmark for a URL, if we have one.
+    func bookmark(for url: URL) -> Data? {
+        items.first { $0.url == url }?.bookmark
+    }
+
     func clear() {
         items = []
         save()
@@ -52,6 +57,19 @@ final class RecentsStore {
                                  relativeTo: nil, bookmarkDataIsStale: &stale) else {
             remove(item)
             return nil
+        }
+        if stale {
+            // A stale bookmark still resolves now but may stop working later —
+            // recreate and persist it while we can (needs an access scope).
+            #if os(macOS)
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            #endif
+            if let fresh = makeBookmark(url),
+               let idx = items.firstIndex(where: { $0.id == item.id }) {
+                items[idx] = RecentItem(url: url, bookmark: fresh)
+                save()
+            }
         }
         return url
     }

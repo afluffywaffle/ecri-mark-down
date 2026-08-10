@@ -32,7 +32,7 @@ There are no package dependencies to fetch — it's plain Swift/SwiftUI.
 
 ## Status
 
-A personal project shared in case it's useful to someone. The rendered **preview** currently handles headings, emphasis, code, quotes, lists, and links, but not tables, images, or task‑list checkboxes (the source view is unaffected). Contributions and issues are welcome.
+A personal project shared in case it's useful to someone. The rendered **preview** handles headings, emphasis, code, quotes, lists, links, tables, images, and task‑list checkboxes. Contributions and issues are welcome.
 
 ## License
 
