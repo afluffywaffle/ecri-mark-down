@@ -39,6 +39,10 @@ final class WindowRouter {
     /// has wired up the router. Flushed into the first window once it registers.
     private var pendingOpens: [URL] = []
 
+    /// Custom-scheme (`ecrimarkdown://…`) opens queued before the first window
+    /// registers. Flushed alongside `pendingOpens` in `flushPendingOpens()`.
+    private var pendingScratchpadURLs: [URL] = []
+
     /// True once any window has finished appearing. Before that, both direct
     /// store opens and `openWindow(value:)` are unreliable — SwiftUI can drop
     /// openWindow calls made before the scene phase is active, which is how a
@@ -54,12 +58,18 @@ final class WindowRouter {
     /// Called once a window has finished wiring up (`openWindow` set). Opens any
     /// files that arrived before the router was ready into the now-active window.
     func flushPendingOpens() {
-        guard !pendingOpens.isEmpty, let store = activeStore else { return }
+        guard !pendingOpens.isEmpty || !pendingScratchpadURLs.isEmpty,
+              let store = activeStore else { return }
         let urls = pendingOpens
         pendingOpens.removeAll()
         // Open into the existing (initially blank) window so a cold Finder-open
         // shows the file here instead of dropping it and leaving a blank window.
         urls.forEach { store.open(url: $0) }
+        if !pendingScratchpadURLs.isEmpty {
+            let pads = pendingScratchpadURLs
+            pendingScratchpadURLs.removeAll()
+            pads.forEach { deliverScratchpad($0) }
+        }
     }
 
     func setActive(_ store: EditorStore) { activeStore = store }
@@ -80,6 +90,29 @@ final class WindowRouter {
             store.open(url: url)
         } else {
             openInNewWindow(url)
+        }
+    }
+
+    /// Route a custom-scheme open (ecrimarkdown://…) to the scratchpad.
+    func openScratchpad(_ url: URL) {
+        guard windowHasRegistered else {
+            pendingScratchpadURLs.append(url)
+            return
+        }
+        deliverScratchpad(url)
+    }
+
+    private func deliverScratchpad(_ url: URL) {
+        guard let store = activeStore else { return }
+        if url.host?.lowercased() == "new" {
+            store.newDocument()
+        } else {
+            // Select an untouched blank scratchpad tab if one exists, else make one.
+            if let blank = store.documents.first(where: { $0.fileURL == nil && !$0.isModified && $0.content.isEmpty }) {
+                store.selectedID = blank.id
+            } else {
+                store.newDocument()
+            }
         }
     }
 

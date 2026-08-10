@@ -8,6 +8,11 @@ only things that carry work forward.
 
 ## Thread: ios-port
 
+> **SUPERSEDED 2026-08-09.** PR #3 was **merged** into `main` (`e3393b1`); the
+> `ios-port` branch is deleted. The live thread is `## Thread: app-intents-widget`
+> **below** — read that first. This section's pipeline (items 2–5), settled
+> decisions, and gotchas are still current and are carried forward there.
+
 > Stamped 2026-08-09 (Sunday). Cold-start map for the iOS port + CloudKit sync /
 > Apple Watch design thread.
 
@@ -140,4 +145,141 @@ Build both platforms to confirm you're cold-start clean:
   SCHEME=$(xcodebuild -project "écri mark down.xcodeproj" -list 2>/dev/null | awk '/Schemes:/{getline; gsub(/^ +/,""); print; exit}')
   xcodebuild -project "écri mark down.xcodeproj" -scheme "$SCHEME" -destination 'platform=macOS' build
 Then do Pipeline item #1 (merge PR #3). Report what you did.
+```
+
+---
+
+## Thread: app-intents-widget
+
+> Stamped 2026-08-09. Cold-start map for the "launch-to-scratchpad" thread
+> (App Intents + widget + Control Center), a follow-on to the iOS port.
+
+### What was done
+
+**PR #3 (iOS port) is MERGED into `main`** (`e3393b1`, "feat: iOS port — Safari-style
+tabs, view menu, title rename (#3)"). The design docs (`SYNC-WATCH-DESIGN.md`),
+`HANDOFF.md`, and `docs/USAGE.md` came along with it. The remote `ios-port` branch
+was deleted; the local one was pruned.
+
+Then the **launch-to-scratchpad feature** was built on branch
+`feat/app-intents-widget` (off `main @ e3393b1`). It adds a custom URL scheme +
+every "open to the scratchpad" surface:
+
+- **URL scheme `ecrimarkdown`** registered in `Info.plist` (`CFBundleURLTypes`).
+- **`e_cri_mark_downApp.swift`** — `.onOpenURL` branches: `ecrimarkdown://` →
+  `WindowRouter.openScratchpad`, else → the existing `openFile`. Added an iOS-only
+  `@UIApplicationDelegateAdaptor(iOSAppDelegate)` that installs two home-screen
+  **quick actions** ("Open Scratchpad" / "New Scratchpad") + a `performActionFor`
+  fallback.
+- **`WindowRouter.swift`** — `openScratchpad(_:)` + `pendingScratchpadURLs` queue +
+  `deliverScratchpad(_:)` (`//new` → `newDocument()`, else select/create a blank
+  untitled tab). Mirrors the existing `openFile` cold-launch queueing.
+- **`ScratchpadIntents.swift`** (app target) — `OpenScratchpadIntent`,
+  `NewScratchpadIntent`, `ScratchpadShortcuts` (AppShortcutsProvider → Siri/Spotlight).
+- **New `ScratchpadWidget/` app-extension target** — home-screen widget (small +
+  medium launcher) + Control Center control (`StaticControlConfiguration` +
+  `ControlWidgetButton`). Both funnel through `ecrimarkdown://`.
+- **`.pbxproj`** — new widget target, embed CopyFiles phase, target dependency,
+  `.appex` product, all NFD-consistent.
+
+**Design decision:** the widget/control are **launchers only** today (the app has no
+"scratchpad" concept yet — that arrives with the CloudKit store). When sync lands,
+`ScratchpadWidget` becomes an `AppIntentTimelineProvider` showing the current pad
+(title/content).
+
+### Current state
+
+- Branch `feat/app-intents-widget`, feature **COMMITTED** as `cd6dfed`
+  ("feat: launch-to-scratchpad — URL scheme, quick actions, widget, Control
+  Center"), 1 ahead of `main`. Working tree **clean**. Not yet pushed, PR not yet
+  opened.
+- **Both builds pass** (verified): macOS and iOS-Simulator SUCCEEDED, zero `error:`.
+- **Code gate: PASS** (Opus) — all 7 acceptance criteria CONFIRMED, all 5 implementer
+  deviations verified correct, no blocking bugs.
+
+### Pipeline / todo (in this order)
+
+1. **Push + open PR** (`feat/app-intents-widget` → `main`). The feature is committed
+   (`cd6dfed`) but **not pushed** — do this first so a cold session resumes from a
+   pushed state. (`git push -u origin feat/app-intents-widget`, then open the PR.)
+2. **User on-device check** (the one thing a build gate can't prove): add the widget
+   from the gallery, add the control in Control Center edit mode, long-press the app
+   icon, say "Hey Siri, open my scratchpad" — each should land in the app. If the
+   Control Center button doesn't appear, that's the known riskiest surface
+   (StaticControlConfiguration is wired but runtime appearance is only provable on
+   a device).
+3. **CloudKit sync core (iOS + macOS)** — the spine of `docs/SYNC-WATCH-DESIGN.md`.
+   iCloud/CloudKit entitlement + container, a `SyncService` singleton over
+   `CKDatabase`, map `Document ↔ CKRecord`, current-pad (`archivedAt == nil`) +
+   archive model, soft delete (`deletedAt`), last-writer-wins on `updatedAt`.
+   Medium-high risk (first CloudKit in this codebase) but unblocks 4, 5, and the
+   widget's real content (this is when `ScratchpadWidget` becomes an
+   `AppIntentTimelineProvider` showing the current pad).
+4. **iPhone scratchpad UI** — current pad on top, archive below, flat list; keep the
+   existing `.md` quick-edit via the file picker. `écri mark down/ContentView.swift`.
+5. **Watch app (RISKIEST — do LAST)** — new watchOS target. One current pad +
+   long-press `contextMenu` "New Scratchpad" → archive → fresh pad. Keyboard +
+   dictation via one focused `TextField`. Direct CloudKit with `WCSession` phone
+   relay fallback. High risk: new target, watch background budget, CloudKit-on-watch
+   container quirks.
+6. **Polish** — offline edge cases, multi-window truth, migration from the current
+   file-only workflow.
+
+### Gotchas (this thread)
+
+- **SourceKit/LSP diagnostics are phantom on this project** ("Cannot find type
+  'PendingOpen' in scope", "'main' attribute cannot be used in a module that
+  contains top-level code", "Cannot find 'ContentView' in scope", etc.). IGNORE
+  them — the ONLY authoritative check is `xcodebuild … | grep -E "error:|BUILD"`.
+- **Two schemes now exist.** `xcodebuild -list` shows the app scheme (project name)
+  AND `ScratchpadWidget`. The awk scheme-capture may pick either — for the app build
+  ensure the captured scheme is the app's (the widget scheme alone won't exercise the
+  embed).
+- **`CODE_SIGN_ENTITLEMENTS[sdk=macosx*]`** was NFC→NFD-normalized as a side effect of
+  the diff, then fixed back to NFC (the on-disk entitlements file is NFC). Now NFC
+  again, macOS still builds.
+- **Control Center API:** there is no `ControlCenter.framework` in the iOS 26.5 SDK;
+  the ControlWidget API lives in SwiftUI/WidgetKit (`StaticControlConfiguration` +
+  `ControlWidgetButton`). Don't import `ControlCenter`.
+- The embed CopyFiles phase uses `dstPath=""` (`dstSubfolderSpec=13`) +
+  `platformFilter=ios` — the `$(PLUGINS_FOLDER_PATH)` form produces a nested
+  `PlugIns/PlugIns/` bundle, and without `platformFilter=ios` the macOS bundle would
+  get a stray PlugIns. Don't "fix" either.
+- The app's intent files add `import SwiftUI` (AppIntents doesn't re-export
+  `EnvironmentValues`); the widget's `Info.plist` sits in a
+  `PBXFileSystemSynchronizedBuildFileExceptionSet` so it doesn't conflict with
+  `GENERATE_INFOPLIST_FILE`.
+
+### What NOT to re-derive
+
+- The iOS port itself (merged). The macOS window-close save guard. The EPUB/docx
+  security fixes. All settled design decisions in `docs/SYNC-WATCH-DESIGN.md`
+  (D1/D2/D3). The `ecrimarkdown://` deep-link design.
+
+### Done log (this thread)
+
+- `e3393b1` (2026-08-09) — **feat: iOS port** (#3, merged) — Safari-style tabs, view
+  menu, title rename.
+- Uncommitted — **feat: launch-to-scratchpad** — URL scheme, quick actions,
+  Siri/Shortcuts, home-screen widget + Control Center control, new widget extension
+  target. Builds pass; gate PASS.
+
+### Next session — paste this to start
+
+```
+Project: /Users/jayromacorda/Develop/écri mark down
+Thread: app-intents-widget — read HANDOFF.md "## Thread: app-intents-widget" first.
+
+FIRST: regenerate the in-session task list from this thread's "Pipeline / todo"
+section (TaskCreate each item, in order) — the file is the source of truth, not
+chat. Mark the first two (commit+PR, on-device check) as you go.
+
+State: branch feat/app-intents-widget, working tree dirty with the feature
+(Info.plist, docs/USAGE.md, project.pbxproj, WindowRouter.swift,
+e_cri_mark_downApp.swift modified; ScratchpadWidget/ + ScratchpadIntents.swift
+new). HEAD e3393b1. Builds pass (macOS + iOS sim), code gate PASS.
+
+Next: Pipeline item #1 — commit the feature and open a PR
+(feat/app-intents-widget → main), then hand to the user for the on-device check
+(item #2). Then continue to CloudKit sync core (item #3).
 ```
