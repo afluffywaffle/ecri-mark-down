@@ -9,17 +9,28 @@ import SwiftUI
 #if canImport(AppKit)
 import AppKit
 #endif
+#if !os(macOS)
+import UIKit
+#endif
 
 @main
 struct e_cri_mark_downApp: App {
     #if os(macOS)
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    #else
+    @UIApplicationDelegateAdaptor(iOSAppDelegate.self) private var appDelegate
     #endif
 
     var body: some Scene {
         WindowGroup(for: PendingOpen.self) { $pending in
             ContentView(pending: pending)
-                .onOpenURL { url in WindowRouter.shared.openFile(url: url) }
+                .onOpenURL { url in
+                    if url.scheme?.lowercased() == "ecrimarkdown" {
+                        WindowRouter.shared.openScratchpad(url)
+                    } else {
+                        WindowRouter.shared.openFile(url: url)
+                    }
+                }
         }
         .commands { AppCommands() }
         #if os(macOS)
@@ -63,6 +74,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default:
             return .terminateCancel
         }
+    }
+}
+#endif
+
+#if !os(macOS)
+final class iOSAppDelegate: NSObject, UIApplicationDelegate {
+    /// Home-screen quick actions: both funnel through the `ecrimarkdown://` URL
+    /// scheme so the app handles them in the one place (see `.onOpenURL`).
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        application.shortcutItems = [
+            UIApplicationShortcutItem(
+                type: "openScratchpad",
+                localizedTitle: "Open Scratchpad",
+                localizedSubtitle: nil,
+                icon: UIApplicationShortcutIcon(systemImageName: "square.and.pencil"),
+                userInfo: ["url": "ecrimarkdown://scratchpad" as NSString]
+            ),
+            UIApplicationShortcutItem(
+                type: "newScratchpad",
+                localizedTitle: "New Scratchpad",
+                localizedSubtitle: nil,
+                icon: UIApplicationShortcutIcon(systemImageName: "plus"),
+                userInfo: ["url": "ecrimarkdown://new" as NSString]
+            ),
+        ]
+        return true
+    }
+
+    /// Fallback path when the system delivers a quick action instead of opening
+    /// the URL. Reads the target URL out of `userInfo` and opens it.
+    func application(_ application: UIApplication,
+                     performActionFor shortcutItem: UIApplicationShortcutItem,
+                     completionHandler: @escaping (Bool) -> Void) {
+        if let urlString = shortcutItem.userInfo?["url"] as? String,
+           let url = URL(string: urlString) {
+            UIApplication.shared.open(url)
+        }
+        completionHandler(true)
     }
 }
 #endif
