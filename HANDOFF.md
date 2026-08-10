@@ -176,16 +176,27 @@ every "open to the scratchpad" surface:
   untitled tab). Mirrors the existing `openFile` cold-launch queueing.
 - **`ScratchpadIntents.swift`** (app target) — `OpenScratchpadIntent`,
   `NewScratchpadIntent`, `ScratchpadShortcuts` (AppShortcutsProvider → Siri/Spotlight).
+  Phrases include natural "scratchpad" utterances (e.g. "Open my scratchpad in
+  écri mark down") — **every** phrase must contain `${applicationName}` or the
+  appintentsmetadataprocessor errors at build time.
 - **New `ScratchpadWidget/` app-extension target** — home-screen widget (small +
-  medium launcher) + Control Center control (`StaticControlConfiguration` +
-  `ControlWidgetButton`). Both funnel through `ecrimarkdown://`.
-- **`.pbxproj`** — new widget target, embed CopyFiles phase, target dependency,
-  `.appex` product, all NFD-consistent.
+  medium launcher). Funnels through `ecrimarkdown://`.
 
-**Design decision:** the widget/control are **launchers only** today (the app has no
+**Design decision:** the widget is a **launcher only** today (the app has no
 "scratchpad" concept yet — that arrives with the CloudKit store). When sync lands,
 `ScratchpadWidget` becomes an `AppIntentTimelineProvider` showing the current pad
 (title/content).
+
+**Control Center / Lock Screen control: REMOVED (2026-08-09).** The original build
+added `ScratchpadControl` (`StaticControlConfiguration` + `ControlWidgetButton`).
+On-device on iOS 26 beta it appeared in the gallery and lit up on tap but never
+launched the app — even after giving the widget intents membership in both targets
+(the documented fix). Rather than fight iOS 26 beta specifics, the control was
+removed: `ScratchpadControl.swift` deleted, `ScratchpadControl()` dropped from the
+bundle, unused `ScratchpadOpenIntent` removed, and the app-target
+`PBXFileSystemSynchronizedBuildFileExceptionSet` reverted. `ScratchpadNewIntent`
+stays (the medium widget's + button uses it, runs in the widget process). If the
+control returns later, revisit on a stable iOS release.
 
 ### Current state
 
@@ -239,9 +250,14 @@ every "open to the scratchpad" surface:
 - **`CODE_SIGN_ENTITLEMENTS[sdk=macosx*]`** was NFC→NFD-normalized as a side effect of
   the diff, then fixed back to NFC (the on-disk entitlements file is NFC). Now NFC
   again, macOS still builds.
-- **Control Center API:** there is no `ControlCenter.framework` in the iOS 26.5 SDK;
-  the ControlWidget API lives in SwiftUI/WidgetKit (`StaticControlConfiguration` +
-  `ControlWidgetButton`). Don't import `ControlCenter`.
+- **AppIntents phrases:** the `appintentsmetadataprocessor` rejects any
+  `AppShortcut` utterance that lacks `${applicationName}` — "Invalid Utterance. Every
+  App Shortcut utterance should have one '${applicationName}' in it." (At least
+  Apple's docs previously said one phrase; the tool enforces ALL.) Every phrase must
+  carry `\(.applicationName)`, e.g. "Open my scratchpad in \(.applicationName)".
+- **Control Center / Lock Screen control on iOS 26 beta** was removed rather than
+  fixed (lights up on tap but never launches the app, even with dual-target intent
+  membership). Revisit only on a stable iOS release if needed.
 - The embed CopyFiles phase uses `dstPath=""` (`dstSubfolderSpec=13`) +
   `platformFilter=ios` — the `$(PLUGINS_FOLDER_PATH)` form produces a nested
   `PlugIns/PlugIns/` bundle, and without `platformFilter=ios` the macOS bundle would
@@ -265,6 +281,10 @@ every "open to the scratchpad" surface:
   Siri/Shortcuts, home-screen widget + Control Center control, new widget extension
   target. Committed on `feat/app-intents-widget`; builds pass; gate PASS.
 - Pushed + **PR #4** opened (2026-08-09) — `feat/app-intents-widget` → `main`.
+- On-device check (2026-08-09, iPhone Air): widget + quick actions + Siri work;
+  **Control Center / Lock Screen control broken on iOS 26 beta** (lights up, no
+  launch) → **control removed**; Siri phrases expanded (natural "scratchpad"
+  utterances — every phrase must carry the app name). Rebuilt + reinstalled.
 
 ### Next session — paste this to start
 
@@ -276,12 +296,14 @@ FIRST: regenerate the in-session task list from this thread's "Pipeline / todo"
 section (TaskCreate each item, in order) — the file is the source of truth, not
 chat. Mark the first two (commit+PR, on-device check) as you go.
 
-State: branch feat/app-intents-widget, feature committed (cd4950e), PUSHED, **PR #4
-open** (feat/app-intents-widget → main, https://github.com/afluffywaffle/ecri-mark-down/pull/4).
-Working tree clean. Builds pass (macOS + iOS sim), code gate PASS.
+State: branch feat/app-intents-widget, feature committed (cd4950e) + PR #4 open
+(https://github.com/afluffywaffle/ecri-mark-down/pull/4). On-device check done:
+widget/quick-actions/Siri work; Control Center + Lock Screen control removed
+(iOS 26 beta: lights up but never launches); Siri phrases expanded. Uncommitted:
+Siri phrase fix + control removal + HANDOFF/docs updates. Working tree clean
+after commit. Builds pass (device + widget scheme).
 
-Next: hand to the user for the on-device check (Pipeline item #2 — add the widget,
-add the Control Center control, long-press the app icon, "Hey Siri, open my
-scratchpad" — each should land in the app; the Control Center button is the
-riskiest surface). Then continue to CloudKit sync core (item #3).
+Next: commit the on-device check fixes (Siri phrases + control removal + docs),
+let the user confirm Siri phrase works on-device, then continue to CloudKit sync
+core (item #3).
 ```

@@ -13,10 +13,9 @@ from several places without opening the app and tapping around:
 - **Home screen widget** — add the **Scratchpad** widget (press-and-hold on the
   home screen → Edit → widget gallery). Tap it to open the scratchpad. The
   medium widget also has a **+** button for a new scratchpad.
-- **Control Center** — add the **Scratchpad** button (open Control Center, long-
-  press to edit, tap **+**, find the écri mark down section). Tap it to open.
-- **Siri / Shortcuts / Spotlight** — say "Open écri mark down" or "New écri mark
-  down", or run the matching Shortcut action.
+- **Siri / Shortcuts / Spotlight** — say "Open écri mark down", "Open my
+  scratchpad in écri mark down", "New écri mark down", "Start a new scratchpad in
+  écri mark down", or run the matching Shortcut action.
 
 All of these land in the app at a fresh scratchpad tab. (Today the app opens to a
 blank tab anyway; once CloudKit sync lands, the widget will show the current

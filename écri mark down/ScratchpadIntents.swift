@@ -36,11 +36,23 @@ struct NewScratchpadIntent: AppIntent {
 }
 
 /// Surfaces the scratchpad actions to Siri / Shortcuts / Spotlight.
+///
+/// The `appintentsmetadataprocessor` requires EVERY utterance to contain the
+/// `${applicationName}` substitution, so each phrase carries the app name — that
+/// is also how Siri disambiguates this shortcut from other apps'.
 struct ScratchpadShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: OpenScratchpadIntent(),
-                    phrases: ["Open \(.applicationName)"])
+                    phrases: [
+                        "Open \(.applicationName)",
+                        "Open my scratchpad in \(.applicationName)",
+                        "Go to my scratchpad in \(.applicationName)",
+                    ])
         AppShortcut(intent: NewScratchpadIntent(),
-                    phrases: ["New \(.applicationName)"])
+                    phrases: [
+                        "New \(.applicationName)",
+                        "Start a new scratchpad in \(.applicationName)",
+                        "Make a new scratchpad in \(.applicationName)",
+                    ])
     }
 }

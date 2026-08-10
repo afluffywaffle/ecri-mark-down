@@ -5,6 +5,5 @@ import WidgetKit
 struct ScratchpadWidgetBundle: WidgetBundle {
     var body: some Widget {
         ScratchpadWidget()
-        ScratchpadControl()
     }
 }
