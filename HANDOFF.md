@@ -182,6 +182,17 @@ every "open to the scratchpad" surface:
 - **New `ScratchpadWidget/` app-extension target** — home-screen widget (small +
   medium launcher). Funnels through `ecrimarkdown://`.
 
+**Siri / Shortcuts: REMOVED (2026-08-09).** Same iOS 26 beta AppIntents wall as the
+control — see below. On-device, Siri only ever matched the plain app-name phrase
+("open écri mark down"), which is really just Siri opening the app by name. The
+diagnostic that explained it: the exported SSU corpus (`Metadata.appintents/root.ssu.yaml`)
+contains **only** the `${applicationName}` utterances, not the natural "scratchpad"
+phrases — the NLU corpus is what Siri matches against. So natural utterances were
+never matchable. App-target `ScratchpadIntents.swift` (intents + `ScratchpadShortcuts`
+provider) was deleted; quick actions are URL-scheme based and unaffected; the
+widget's own `ScratchpadNewIntent` (its + button) is separate and kept. Revisit on
+a stable iOS release if Siri matters.
+
 **Design decision:** the widget is a **launcher only** today (the app has no
 "scratchpad" concept yet — that arrives with the CloudKit store). When sync lands,
 `ScratchpadWidget` becomes an `AppIntentTimelineProvider` showing the current pad
@@ -214,12 +225,12 @@ control returns later, revisit on a stable iOS release.
 
 1. ~~**Push + open PR**~~ **DONE (2026-08-09):** branch pushed, **PR #4** open
    (`feat/app-intents-widget` → `main`), awaiting review/merge.
-2. **User on-device check** (the one thing a build gate can't prove): add the widget
-   from the gallery, add the control in Control Center edit mode, long-press the app
-   icon, say "Hey Siri, open my scratchpad" — each should land in the app. If the
-   Control Center button doesn't appear, that's the known riskiest surface
-   (StaticControlConfiguration is wired but runtime appearance is only provable on
-   a device).
+2. ~~**User on-device check**~~ **DONE (2026-08-09, iPhone Air):** widget + app-icon
+   quick actions work. **Control Center / Lock Screen control + Siri AppShortcuts
+   REMOVED** (iOS 26 beta AppIntents unreliable: control lights up but never
+   launches; Siri only ever matched the app-name phrase — natural utterances never
+   reached the NLU corpus). Rebuilt + reinstalled, app launches. Remaining: user
+   confirms the installed build is clean.
 3. **CloudKit sync core (iOS + macOS)** — the spine of `docs/SYNC-WATCH-DESIGN.md`.
    iCloud/CloudKit entitlement + container, a `SyncService` singleton over
    `CKDatabase`, map `Document ↔ CKRecord`, current-pad (`archivedAt == nil`) +
@@ -252,12 +263,16 @@ control returns later, revisit on a stable iOS release.
   again, macOS still builds.
 - **AppIntents phrases:** the `appintentsmetadataprocessor` rejects any
   `AppShortcut` utterance that lacks `${applicationName}` — "Invalid Utterance. Every
-  App Shortcut utterance should have one '${applicationName}' in it." (At least
-  Apple's docs previously said one phrase; the tool enforces ALL.) Every phrase must
-  carry `\(.applicationName)`, e.g. "Open my scratchpad in \(.applicationName)".
-- **Control Center / Lock Screen control on iOS 26 beta** was removed rather than
-  fixed (lights up on tap but never launches the app, even with dual-target intent
-  membership). Revisit only on a stable iOS release if needed.
+  App Shortcut utterance should have one '${applicationName}' in it." Every phrase
+  must carry `\(.applicationName)`. AND the SSU corpus (`Metadata.appintents/root.ssu.yaml` —
+  what Siri actually matches against) may contain ONLY the app-name utterance even
+  when extract.actionsdata lists the natural phrases — so natural phrases can be
+  exported yet unmatchable. To debug, inspect `root.ssu.yaml` in the built bundle.
+- **Control Center / Lock Screen control + Siri on iOS 26 beta:** both REMOVED
+  (control lights up but never launches even with dual-target intent membership;
+  Siri never matched natural phrases). Revisit only on a stable iOS release if
+  needed. The one surface that works is the URL-scheme-funneled one (widget + quick
+  actions) — prefer `ecrimarkdown://` over AppIntents where possible.
 - The embed CopyFiles phase uses `dstPath=""` (`dstSubfolderSpec=13`) +
   `platformFilter=ios` — the `$(PLUGINS_FOLDER_PATH)` form produces a nested
   `PlugIns/PlugIns/` bundle, and without `platformFilter=ios` the macOS bundle would
@@ -281,10 +296,11 @@ control returns later, revisit on a stable iOS release.
   Siri/Shortcuts, home-screen widget + Control Center control, new widget extension
   target. Committed on `feat/app-intents-widget`; builds pass; gate PASS.
 - Pushed + **PR #4** opened (2026-08-09) — `feat/app-intents-widget` → `main`.
-- On-device check (2026-08-09, iPhone Air): widget + quick actions + Siri work;
+- On-device check (2026-08-09, iPhone Air): widget + quick actions work;
   **Control Center / Lock Screen control broken on iOS 26 beta** (lights up, no
-  launch) → **control removed**; Siri phrases expanded (natural "scratchpad"
-  utterances — every phrase must carry the app name). Rebuilt + reinstalled.
+  launch) → **control removed**; **Siri AppShortcuts dropped** (only the app-name
+  phrase ever matched — natural utterances never reached the NLU corpus). Rebuilt +
+  reinstalled.
 
 ### Next session — paste this to start
 
@@ -296,14 +312,13 @@ FIRST: regenerate the in-session task list from this thread's "Pipeline / todo"
 section (TaskCreate each item, in order) — the file is the source of truth, not
 chat. Mark the first two (commit+PR, on-device check) as you go.
 
-State: branch feat/app-intents-widget, feature committed (cd4950e) + PR #4 open
+State: branch feat/app-intents-widget, PR #4 open
 (https://github.com/afluffywaffle/ecri-mark-down/pull/4). On-device check done:
-widget/quick-actions/Siri work; Control Center + Lock Screen control removed
-(iOS 26 beta: lights up but never launches); Siri phrases expanded. Uncommitted:
-Siri phrase fix + control removal + HANDOFF/docs updates. Working tree clean
-after commit. Builds pass (device + widget scheme).
+widget + quick actions work; Control Center/Lock Screen control AND Siri
+AppShortcuts both REMOVED (iOS 26 beta AppIntents unreliable). Uncommitted: Siri
+surface removal (app-target ScratchpadIntents.swift deleted) + docs/USAGE.md +
+HANDOFF updates.
 
-Next: commit the on-device check fixes (Siri phrases + control removal + docs),
-let the user confirm Siri phrase works on-device, then continue to CloudKit sync
-core (item #3).
+Next: rebuild + reinstall on device, commit + push the Siri removal to PR #4, let
+the user confirm the build is clean, then continue to CloudKit sync core (item #3).
 ```
