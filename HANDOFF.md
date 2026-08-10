@@ -189,19 +189,20 @@ every "open to the scratchpad" surface:
 
 ### Current state
 
-- Branch `feat/app-intents-widget`, feature **COMMITTED** as `cd6dfed`
+- Branch `feat/app-intents-widget`, feature **COMMITTED** as `cd4950e`
   ("feat: launch-to-scratchpad — URL scheme, quick actions, widget, Control
-  Center"), 1 ahead of `main`. Working tree **clean**. Not yet pushed, PR not yet
-  opened.
+  Center"), 1 ahead of `main`. Working tree **clean**.
+- **PUSHED + PR OPEN:** `git push -u origin feat/app-intents-widget` done;
+  **PR #4** (`feat/app-intents-widget` → `main`) opened
+  (https://github.com/afluffywaffle/ecri-mark-down/pull/4). 589+/2− across 12 files.
 - **Both builds pass** (verified): macOS and iOS-Simulator SUCCEEDED, zero `error:`.
 - **Code gate: PASS** (Opus) — all 7 acceptance criteria CONFIRMED, all 5 implementer
   deviations verified correct, no blocking bugs.
 
 ### Pipeline / todo (in this order)
 
-1. **Push + open PR** (`feat/app-intents-widget` → `main`). The feature is committed
-   (`cd6dfed`) but **not pushed** — do this first so a cold session resumes from a
-   pushed state. (`git push -u origin feat/app-intents-widget`, then open the PR.)
+1. ~~**Push + open PR**~~ **DONE (2026-08-09):** branch pushed, **PR #4** open
+   (`feat/app-intents-widget` → `main`), awaiting review/merge.
 2. **User on-device check** (the one thing a build gate can't prove): add the widget
    from the gallery, add the control in Control Center edit mode, long-press the app
    icon, say "Hey Siri, open my scratchpad" — each should land in the app. If the
@@ -260,9 +261,10 @@ every "open to the scratchpad" surface:
 
 - `e3393b1` (2026-08-09) — **feat: iOS port** (#3, merged) — Safari-style tabs, view
   menu, title rename.
-- Uncommitted — **feat: launch-to-scratchpad** — URL scheme, quick actions,
+- `cd4950e` (2026-08-09) — **feat: launch-to-scratchpad** — URL scheme, quick actions,
   Siri/Shortcuts, home-screen widget + Control Center control, new widget extension
-  target. Builds pass; gate PASS.
+  target. Committed on `feat/app-intents-widget`; builds pass; gate PASS.
+- Pushed + **PR #4** opened (2026-08-09) — `feat/app-intents-widget` → `main`.
 
 ### Next session — paste this to start
 
@@ -274,12 +276,12 @@ FIRST: regenerate the in-session task list from this thread's "Pipeline / todo"
 section (TaskCreate each item, in order) — the file is the source of truth, not
 chat. Mark the first two (commit+PR, on-device check) as you go.
 
-State: branch feat/app-intents-widget, working tree dirty with the feature
-(Info.plist, docs/USAGE.md, project.pbxproj, WindowRouter.swift,
-e_cri_mark_downApp.swift modified; ScratchpadWidget/ + ScratchpadIntents.swift
-new). HEAD e3393b1. Builds pass (macOS + iOS sim), code gate PASS.
+State: branch feat/app-intents-widget, feature committed (cd4950e), PUSHED, **PR #4
+open** (feat/app-intents-widget → main, https://github.com/afluffywaffle/ecri-mark-down/pull/4).
+Working tree clean. Builds pass (macOS + iOS sim), code gate PASS.
 
-Next: Pipeline item #1 — commit the feature and open a PR
-(feat/app-intents-widget → main), then hand to the user for the on-device check
-(item #2). Then continue to CloudKit sync core (item #3).
+Next: hand to the user for the on-device check (Pipeline item #2 — add the widget,
+add the Control Center control, long-press the app icon, "Hey Siri, open my
+scratchpad" — each should land in the app; the Control Center button is the
+riskiest surface). Then continue to CloudKit sync core (item #3).
 ```
